@@ -101,17 +101,6 @@ python backend/run_check.py \
   --model "gpt-4o"
 ```
 
-## Judging criteria alignment
-
-| Criterion | Weight | How this project delivers |
-|---|---|---|
-| Innovation & problem impact | 25% | Turns AI governance from a policy document into a running, queryable system |
-| Effective use of Exasol Personal | 25% | Exasol is the knowledge base, the audit log, and the analytics layer |
-| Technical excellence | 20% | Embedding-based claim verification, a normalized audit schema, live-querying dashboard |
-| Solution design & UX | 15% | One screen: submit, verify, see the verdict, drill into any flagged claim |
-| Presentation & demo | 10% | Full loop demoed end to end on real data |
-| GitHub & documentation | 5% | This README, schema, `.env` template, and a step-by-step run guide |
-
 ## Team
 
 Raghul K and team — VIT Vellore
