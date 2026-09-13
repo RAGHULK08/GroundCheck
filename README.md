@@ -101,15 +101,14 @@ python backend/run_check.py \
   --model "gpt-4o"
 ```
 
-## Team Members
+## Team Members  — VIT Vellore
 
 1. DANIEL 
 2. PARTHA SARATHI 
 3. Raghul
 4. Vineth
 5. Vijay Sankar
- — VIT Vellore
 
 ## License
 
-Built for the Exasol AI + Data Challenge 2026. See event rules for submission terms.
+Built for the Exasol AI + Data Challenge 2026.
