@@ -1,8 +1,8 @@
-<img width="1360" height="457" alt="image" src="https://github.com/user-attachments/assets/8a80a709-bcc0-47fc-8187-2ac2b4bdd92a" /># GroundCheck / AuditLens
+<img width="1360" height="457" alt="image" src="https://github.com/user-attachments/assets/8a80a709-bcc0-47fc-8187-2ac2b4bdd92a" /># 
+
+**GroundCheck / AuditLens**
 
 **An LLM output verification and audit-trail layer, built on Exasol Personal.**
-
-Submission for the **Exasol AI + Data Challenge 2026 (Devjam)** — Track: *AI Trust, Safety & Governance*.
 
 ---
 
@@ -100,15 +100,3 @@ python backend/run_check.py \
   --response "Refunds are issued within 30 days, no questions asked." \
   --model "gpt-4o"
 ```
-
-## Team Members  — VIT Vellore
-
-1. DANIEL 
-2. PARTHA SARATHI 
-3. Raghul
-4. Vineth
-5. Vijay Sankar
-
-## License
-
-Built for the Exasol AI + Data Challenge 2026.
