@@ -1,0 +1,5 @@
+{
+  "name": "GroundCheck / AuditLens",
+  "description": "LLM output verification and audit-trail governance layer built for Exasol",
+  "version": "1.0.0"
+}
