@@ -407,7 +407,7 @@ export async function verifyResponse(
       claimsAnalysis,
       numClaims: totalClaims,
       numFlagged: flaggedSpans.length,
-      latencyMs: Math.max(15, latencyMs),
+      latencyMs,
       citations,
       usedWebSearch: didUseWebSearch,
       promptKbScore: Math.round(promptKbScore * 100) / 100,

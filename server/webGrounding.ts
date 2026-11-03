@@ -33,6 +33,8 @@ export interface WebGroundingResult {
   errorCode?: string;
   /** Gemini attempts used. */
   attempts?: number;
+  /** What answered: 'gemini:<model>' for Google Search grounding, else the search provider name. */
+  provider?: string;
 }
 
 const SYSTEM_INSTRUCTION = `You are a research assistant with Google Search.
@@ -111,6 +113,7 @@ async function callGroundedModel(ai: GoogleGenAI, q: string, timeoutMs: number):
       contents: `SEARCH TEXT:\n"""\n${q}\n"""`,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
+        temperature: 0,
         tools: [{ googleSearch: {} }],
         abortSignal: controller.signal,
       },
@@ -136,9 +139,11 @@ export async function searchWebGroundedStrict(
   const q = query.replace(/\s+/g, ' ').trim();
   if (!q) return { results: [], searchQueries: [], error: 'Empty query', attempts: 0 };
   if (SEARCH_PROVIDER !== 'gemini') return searchExternalStrict(SEARCH_PROVIDER, q);
-  const key = cacheKey('web', WEB_GROUNDING_MODEL, q);
+  // 'web-t0': entries written before temperature was pinned to 0 are not reused.
+  const key = cacheKey('web-t0', WEB_GROUNDING_MODEL, q);
+  const provider = `gemini:${WEB_GROUNDING_MODEL}`;
   const cached = cacheGet<{ results: GroundedSource[]; searchQueries: string[] }>(key);
-  if (cached) return { ...cached, attempts: 0 };
+  if (cached) return { ...cached, attempts: 0, provider };
 
   try {
     const { value: meta, attempts } = await withRetryDetailed(() => callGroundedModel(ai, q, timeoutMs), 'search.web');
@@ -149,7 +154,7 @@ export async function searchWebGroundedStrict(
     }
     const results = mapGroundingMetadata(meta);
     if (results.length > 0) cacheSet(key, { results, searchQueries });
-    return { results, searchQueries, attempts };
+    return { results, searchQueries, attempts, provider };
   } catch (err) {
     if (err instanceof UpstreamError && (err.code === 'QUOTA_EXCEEDED' || err.code === 'UPSTREAM_UNAVAILABLE')) {
       console.warn(`[search.web] Google search grounding ${err.code}; falling back to search provider...`);
@@ -186,13 +191,13 @@ async function searchExternalStrict(
 ): Promise<WebGroundingResult> {
   const key = cacheKey(`web:${provider}`, provider, q);
   const cached = cacheGet<{ results: GroundedSource[]; searchQueries: string[] }>(key);
-  if (cached) return { ...cached, attempts: 0 };
+  if (cached) return { ...cached, attempts: 0, provider };
   const { value: results, attempts } = await withRetryDetailed(() => callProvider(provider, q), `search.provider.${provider}`);
   if (results.length === 0) {
-    return { results: [], searchQueries: [q], error: `${searchProviderLabel(provider)} returned no results`, attempts };
+    return { results: [], searchQueries: [q], error: `${searchProviderLabel(provider)} returned no results`, attempts, provider };
   }
   cacheSet(key, { results, searchQueries: [q] });
-  return { results, searchQueries: [q], attempts };
+  return { results, searchQueries: [q], attempts, provider };
 }
 
 /** Never throws: upstream failures return no results and an `error` tagged "[CODE] ...". */

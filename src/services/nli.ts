@@ -19,8 +19,8 @@ export interface NLIBatchResult {
   results: NLIProbabilities[];
 }
 
-/** Bumped from v1: v1 entries came from a non-deterministic (temperature != 0) judge. */
-const NLI_CACHE_KEY = 'groundcheck_nli_cache_v2';
+/** v3: v1 and v2 entries came from a judge whose temperature was not set (model default). */
+const NLI_CACHE_KEY = 'groundcheck_nli_cache_v3';
 const MAX_PERSISTED_ENTRIES = 500;
 /** Per-attempt server timeout; one call may judge all top-3 chunks of a claim at once. */
 const DEFAULT_TIMEOUT_MS = 15_000;

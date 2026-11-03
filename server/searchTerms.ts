@@ -106,7 +106,7 @@ export function extractLocalFallbackTerms(prompt: string): string[] {
 }
 
 /** One Gemini attempt with its own timeout; returns the raw response text. */
-async function callTermsModel(ai: GoogleGenAI, prompt: string, timeoutMs: number): Promise<string> {
+async function callTermsModel(ai: GoogleGenAI, prompt: string, timeoutMs: number): Promise<{ text: string; model: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let lastError: unknown;
@@ -118,12 +118,13 @@ async function callTermsModel(ai: GoogleGenAI, prompt: string, timeoutMs: number
           contents: `USER PROMPT:\n"""\n${prompt}\n"""`,
           config: {
             systemInstruction: SYSTEM_INSTRUCTION,
+            temperature: 0,
             responseMimeType: 'application/json',
             responseSchema: RESPONSE_SCHEMA,
             abortSignal: controller.signal,
           },
         });
-        return response.text?.trim() ?? '';
+        return { text: response.text?.trim() ?? '', model };
       } catch (err) {
         lastError = err;
         if (controller.signal.aborted) throw new AttemptTimeoutError(`Term extraction timed out after ${timeoutMs}ms`);
@@ -153,36 +154,42 @@ export async function extractSearchTermsStrict(
   if (!prompt.trim()) {
     return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Empty prompt', attempts: 0 };
   }
-  const key = cacheKey('terms', SEARCH_TERMS_MODEL, normalizeSpaces(prompt));
+  // 'terms-t0': entries written before temperature was pinned to 0 are not reused.
+  const key = cacheKey('terms-t0', SEARCH_TERMS_MODEL, normalizeSpaces(prompt));
   const cached = cacheGet<string[]>(key);
   if (cached) return { terms: cached, source: SEARCH_TERMS_MODEL, attempts: 0 };
-  const { value: text, attempts } = await withRetryDetailed(() => callTermsModel(ai, prompt, timeoutMs), 'search.terms');
+  const {
+    value: { text, model },
+    attempts,
+  } = await withRetryDetailed(() => callTermsModel(ai, prompt, timeoutMs), 'search.terms');
+  // `source` names the model that answered; only primary-model answers are cached.
+  const cacheable = model === SEARCH_TERMS_MODEL;
   if (!text) {
-    return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Term extraction returned an empty response', attempts };
+    return { terms: [], source: model, error: 'Term extraction returned an empty response', attempts };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { terms: [], source: SEARCH_TERMS_MODEL, error: `Term extraction returned invalid JSON: ${text.slice(0, 200)}`, attempts };
+    return { terms: [], source: model, error: `Term extraction returned invalid JSON: ${text.slice(0, 200)}`, attempts };
   }
   const rawTerms = typeof parsed === 'object' && parsed !== null ? (parsed as { terms?: unknown }).terms : undefined;
   const terms = filterTermsAgainstPrompt(rawTerms, prompt);
   if (terms.length === 0) {
     const fallback = extractLocalFallbackTerms(prompt);
     if (fallback.length > 0) {
-      cacheSet(key, fallback);
+      if (cacheable) cacheSet(key, fallback);
       return { terms: fallback, source: 'local-fallback', attempts };
     }
     return {
       terms: [],
-      source: SEARCH_TERMS_MODEL,
+      source: model,
       error: `No usable terms (model returned ${JSON.stringify(rawTerms ?? null).slice(0, 200)})`,
       attempts,
     };
   }
-  cacheSet(key, terms);
-  return { terms, source: SEARCH_TERMS_MODEL, attempts };
+  if (cacheable) cacheSet(key, terms);
+  return { terms, source: model, attempts };
 }
 
 /** Never throws: upstream failures return local terms and an `error` tagged "[CODE] ...". */

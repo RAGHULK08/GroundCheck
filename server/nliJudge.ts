@@ -61,8 +61,14 @@ export interface NliJudgment {
   attempts: number;
 }
 
-/** One Gemini attempt with its own timeout; returns the raw response text. */
-async function callJudgeModel(ai: GoogleGenAI, premise: string, hypothesis: string, timeoutMs: number): Promise<string> {
+/** Raw response text plus the model that actually produced it (primary or a fallback). */
+interface ModelText {
+  text: string;
+  model: string;
+}
+
+/** One Gemini attempt with its own timeout; returns the raw response text and the answering model. */
+async function callJudgeModel(ai: GoogleGenAI, premise: string, hypothesis: string, timeoutMs: number): Promise<ModelText> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let lastError: unknown;
@@ -74,12 +80,13 @@ async function callJudgeModel(ai: GoogleGenAI, premise: string, hypothesis: stri
           contents: `PREMISE:\n"""\n${premise}\n"""\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
           config: {
             systemInstruction: SYSTEM_INSTRUCTION,
+            temperature: 0,
             responseMimeType: 'application/json',
             responseSchema: RESPONSE_SCHEMA,
             abortSignal: controller.signal,
           },
         });
-        return response.text?.trim() ?? '';
+        return { text: response.text?.trim() ?? '', model };
       } catch (err) {
         lastError = err;
         if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
@@ -114,10 +121,10 @@ export async function judgePairStrict(
   const key = nliCacheKey(premise, hypothesis);
   const cached = cacheGet<NLIProbabilities>(key);
   if (cached) return { result: { ...cached, attempts: 0 }, attempts: 0 };
-  const { value: text, attempts } = await withRetryDetailed(
-    () => callJudgeModel(ai, premise, hypothesis, timeoutMs),
-    'nli.judge'
-  );
+  const {
+    value: { text, model },
+    attempts,
+  } = await withRetryDetailed(() => callJudgeModel(ai, premise, hypothesis, timeoutMs), 'nli.judge');
   if (!text) return { result: { ...makeNeutralFallback('NLI model returned an empty response'), attempts }, attempts };
   let parsed: unknown;
   try {
@@ -125,14 +132,17 @@ export async function judgePairStrict(
   } catch {
     return { result: { ...makeNeutralFallback(`NLI model returned invalid JSON: ${text.slice(0, 200)}`), attempts }, attempts };
   }
-  const validation = validateAndNormalizeScores(parsed, NLI_MODEL);
-  if (validation.ok) cacheSet(key, validation.value);
+  // Label the result with the model that answered. Only primary-model answers are cached,
+  // so a fallback answer is never replayed later under the primary model's cache key.
+  const validation = validateAndNormalizeScores(parsed, model);
+  if (validation.ok && model === NLI_MODEL) cacheSet(key, validation.value);
   const result = validation.ok ? validation.value : makeNeutralFallback(validation.error);
   return { result: { ...result, attempts }, attempts };
 }
 
 function nliCacheKey(premise: string, hypothesis: string): string {
-  return cacheKey('nli', NLI_MODEL, premise.trim(), hypothesis.trim());
+  // 'nli-t0': entries written before temperature was pinned to 0 are not reused.
+  return cacheKey('nli-t0', NLI_MODEL, premise.trim(), hypothesis.trim());
 }
 
 const MULTI_SYSTEM_INSTRUCTION = `${SYSTEM_INSTRUCTION}
@@ -165,7 +175,7 @@ async function callMultiJudgeModel(
   premises: readonly string[],
   hypothesis: string,
   timeoutMs: number
-): Promise<string> {
+): Promise<ModelText> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const numbered = premises.map((p, i) => `PREMISE ${i + 1}:\n"""\n${p}\n"""`).join('\n\n');
@@ -178,12 +188,13 @@ async function callMultiJudgeModel(
           contents: `${numbered}\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
           config: {
             systemInstruction: MULTI_SYSTEM_INSTRUCTION,
+            temperature: 0,
             responseMimeType: 'application/json',
             responseSchema: MULTI_RESPONSE_SCHEMA,
             abortSignal: controller.signal,
           },
         });
-        return response.text?.trim() ?? '';
+        return { text: response.text?.trim() ?? '', model };
       } catch (err) {
         lastError = err;
         if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
@@ -202,7 +213,12 @@ async function callMultiJudgeModel(
 }
 
 /** Pure: map a multi-premise response to one result per premise (error-flagged where missing/invalid). */
-export function parseMultiJudgments(text: string, count: number, attempts: number): NLIProbabilities[] {
+export function parseMultiJudgments(
+  text: string,
+  count: number,
+  attempts: number,
+  model: string = NLI_MODEL
+): NLIProbabilities[] {
   const fail = (msg: string): NLIProbabilities[] =>
     Array.from({ length: count }, () => ({ ...makeNeutralFallback(msg), attempts }));
   if (!text) return fail('NLI model returned an empty response');
@@ -223,7 +239,7 @@ export function parseMultiJudgments(text: string, count: number, attempts: numbe
   return Array.from({ length: count }, (_, i) => {
     const item = byIndex.get(i);
     if (item === undefined) return { ...makeNeutralFallback(`NLI model returned no judgment for premise ${i + 1}`), attempts };
-    const validation = validateAndNormalizeScores(item, NLI_MODEL);
+    const validation = validateAndNormalizeScores(item, model);
     return validation.ok ? { ...validation.value, attempts } : { ...makeNeutralFallback(validation.error), attempts };
   });
 }
@@ -241,13 +257,14 @@ export async function judgeHypothesisGroup(
 ): Promise<NLIProbabilities[]> {
   if (premises.length === 1) return [await judgePair(ai, premises[0], hypothesis, timeoutMs)];
   try {
-    const { value: text, attempts } = await withRetryDetailed(
-      () => callMultiJudgeModel(ai, premises, hypothesis, timeoutMs),
-      'nli.judge-group'
-    );
-    const results = parseMultiJudgments(text, premises.length, attempts);
+    const {
+      value: { text, model },
+      attempts,
+    } = await withRetryDetailed(() => callMultiJudgeModel(ai, premises, hypothesis, timeoutMs), 'nli.judge-group');
+    const results = parseMultiJudgments(text, premises.length, attempts, model);
     results.forEach((r, i) => {
-      if (!r.error) {
+      // Cache primary-model answers only (see judgePairStrict).
+      if (!r.error && model === NLI_MODEL) {
         const { attempts: _a, ...clean } = r;
         cacheSet(nliCacheKey(premises[i], hypothesis), clean);
       }

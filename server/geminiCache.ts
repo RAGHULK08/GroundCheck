@@ -5,8 +5,9 @@ import path from 'path';
 /**
  * Server-side cache of successful Gemini results (NLI judgments, search terms, grounded
  * searches), persisted to .cache/gemini-cache.json so restarts and repeated test-suite
- * runs do not spend quota again. Calls are deterministic (temperature 0), so a cached
- * answer for the same model + input is a valid answer. Errors are never cached.
+ * runs do not spend quota again. Calls run at temperature 0 (near-deterministic, though
+ * Gemini does not guarantee identical output), so a cached answer for the same model +
+ * input stands in for a fresh one. Errors and fallback-model answers are never cached.
  *
  * Set GEMINI_CACHE=off to disable. Delete the .cache folder to clear it.
  */
