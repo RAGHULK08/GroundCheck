@@ -275,14 +275,11 @@ async function startServer(): Promise<void> {
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (await isPortInUse(PORT)) exitPortInUse(PORT);
-<<<<<<< HEAD
 
   // One HTTP server for the app AND Vite's hot-reload websocket. Running the websocket on
   // the same port (instead of a separate one like 24678) means it also works behind HTTPS
   // proxies such as Google AI Studio / Cloud Run, which only expose the app's main port.
   const httpServer = http.createServer(app);
-=======
->>>>>>> 944aaa93d161c3df39f0bae24367a9231a791ab8
 
   // Unknown /api paths get a JSON 404; an /api request must never fall through to index.html.
   // Registered after every /api route above and before Vite / static / SPA fallback.
@@ -295,13 +292,8 @@ async function startServer(): Promise<void> {
       server: {
         middlewareMode: true,
         strictPort: true,
-<<<<<<< HEAD
         // DISABLE_HMR=true turns hot reload off entirely (no websocket is attempted).
         hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
-=======
-        hmr: false,
-        watch: null,
->>>>>>> 944aaa93d161c3df39f0bae24367a9231a791ab8
       },
       appType: 'spa',
     });
