@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import net from 'net';
+import http from 'http';
 import { GoogleGenAI } from '@google/genai';
 import { judgePairStrict, judgePairs } from './server/nliJudge.ts';
 import { extractSearchTermsStrict } from './server/searchTerms.ts';
@@ -16,8 +17,6 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-/** Vite HMR websocket port (fixed; never falls back to another port). */
-const HMR_PORT = 24678;
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -275,9 +274,12 @@ function exitPortInUse(port: number): never {
 async function startServer(): Promise<void> {
   const isProduction = process.env.NODE_ENV === 'production';
 
-  for (const port of isProduction ? [PORT] : [PORT, HMR_PORT]) {
-    if (await isPortInUse(port)) exitPortInUse(port);
-  }
+  if (await isPortInUse(PORT)) exitPortInUse(PORT);
+
+  // One HTTP server for the app AND Vite's hot-reload websocket. Running the websocket on
+  // the same port (instead of a separate one like 24678) means it also works behind HTTPS
+  // proxies such as Google AI Studio / Cloud Run, which only expose the app's main port.
+  const httpServer = http.createServer(app);
 
   // Unknown /api paths get a JSON 404; an /api request must never fall through to index.html.
   // Registered after every /api route above and before Vite / static / SPA fallback.
@@ -290,7 +292,8 @@ async function startServer(): Promise<void> {
       server: {
         middlewareMode: true,
         strictPort: true,
-        hmr: process.env.DISABLE_HMR === 'true' ? false : { port: HMR_PORT },
+        // DISABLE_HMR=true turns hot reload off entirely (no websocket is attempted).
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
       },
       appType: 'spa',
     });
@@ -304,10 +307,10 @@ async function startServer(): Promise<void> {
     });
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT} (mode: ${isProduction ? 'production' : 'development'})`);
   });
-  server.on('error', (err: NodeJS.ErrnoException) => {
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') exitPortInUse(PORT);
     console.error('Server error:', err.message);
     process.exit(1);
