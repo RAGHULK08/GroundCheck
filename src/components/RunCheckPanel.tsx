@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { VerificationResult, Verdict } from '../types/groundcheck';
 import { ClaimLogCard, FlagChip, getClaimFlags } from './ClaimLogCard';
+import { useSearchProviderLabel } from '../services/searchProvider';
 
 interface RunCheckPanelProps {
   onRunCheck: (
@@ -76,6 +77,7 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
   errorMessage,
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
+  const searchLabel = useSearchProviderLabel();
   const [prompt, setPrompt] = useState(PRESET_EXAMPLES[0].prompt);
   const [modelName, setModelName] = useState(PRESET_EXAMPLES[0].modelName);
   const [response, setResponse] = useState(PRESET_EXAMPLES[0].response);
@@ -248,11 +250,11 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
                 <div className="font-semibold text-slate-200 flex items-center gap-2">
                   <span>Web Search Fallback</span>
                   <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-cyan-900/60 text-cyan-300 border border-cyan-500/30">
-                    Google Search grounding
+                    {searchLabel}
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-400">
-                  Searches the web through Gemini&apos;s Google Search grounding for each claim. Web sources count as support only if they are similar to and entail the claim, and they are marked lower trust than the knowledge base. If neither source covers a claim, it becomes UNVERIFIABLE.
+                  Searches the web ({searchLabel}) for claims the knowledge base does not already settle. Web sources count as support only if they are similar to and entail the claim, and they are marked lower trust than the knowledge base. If neither source covers a claim, it becomes UNVERIFIABLE.
                 </div>
               </div>
             </div>
@@ -338,7 +340,7 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
                   {latestResult.usedWebSearch && (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-mono font-medium bg-cyan-950/80 border border-cyan-500/40 text-cyan-300">
                       <Globe className="w-3 h-3 text-cyan-400" />
-                      <span>Google Search grounding</span>
+                      <span>{searchLabel}</span>
                     </span>
                   )}
                   {(() => {

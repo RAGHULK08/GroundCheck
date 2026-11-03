@@ -1,6 +1,8 @@
 import { GoogleGenAI, GroundingMetadata } from '@google/genai';
 import { NLI_MODEL } from './nliJudge.ts';
 import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
+import { cacheGet, cacheKey, cacheSet } from './geminiCache.ts';
+import { SEARCH_PROVIDER, SearchProviderName, searchWithProvider, searchProviderLabel } from './searchProviders.ts';
 
 /**
  * Server-side web retrieval through Gemini's Google Search grounding tool.
@@ -10,6 +12,8 @@ import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiR
 
 export const WEB_GROUNDING_MODEL = NLI_MODEL;
 const DEFAULT_TIMEOUT_MS = 8_000;
+/** Per-attempt timeout for external search providers (Tavily basic search is usually 1-3 s; 4 attempts + backoff stay under the 45 s client timeout). */
+const PROVIDER_TIMEOUT_MS = 8_000;
 const MAX_SOURCES = 5;
 const MAX_SNIPPET_LENGTH = 600;
 
@@ -132,12 +136,54 @@ export async function searchWebGroundedStrict(
 ): Promise<WebGroundingResult> {
   const q = query.replace(/\s+/g, ' ').trim();
   if (!q) return { results: [], searchQueries: [], error: 'Empty query', attempts: 0 };
+  if (SEARCH_PROVIDER !== 'gemini') return searchExternalStrict(SEARCH_PROVIDER, q);
+  const key = cacheKey('web', WEB_GROUNDING_MODEL, q);
+  const cached = cacheGet<{ results: GroundedSource[]; searchQueries: string[] }>(key);
+  if (cached) return { ...cached, attempts: 0 };
   const { value: meta, attempts } = await withRetryDetailed(() => callGroundedModel(ai, q, timeoutMs), 'search.web');
   const searchQueries = meta?.webSearchQueries ?? [];
   if (!meta) {
     return { results: [], searchQueries, error: 'Model response contained no grounding metadata', attempts };
   }
-  return { results: mapGroundingMetadata(meta), searchQueries, attempts };
+  const results = mapGroundingMetadata(meta);
+  if (results.length > 0) cacheSet(key, { results, searchQueries });
+  return { results, searchQueries, attempts };
+}
+
+/** One external-provider attempt with its own timeout. */
+async function callProvider(provider: Exclude<SearchProviderName, 'gemini'>, q: string): Promise<GroundedSource[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+  try {
+    return await searchWithProvider(provider, q, controller.signal);
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new AttemptTimeoutError(`${searchProviderLabel(provider)} search timed out after ${PROVIDER_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Web search through an external provider (Tavily / Brave / SearXNG). Uses the 'search'
+ * quota pool (label search.provider.*), so it never spends or pauses Gemini quota.
+ * Successful non-empty results are cached per provider + query.
+ */
+async function searchExternalStrict(
+  provider: Exclude<SearchProviderName, 'gemini'>,
+  q: string
+): Promise<WebGroundingResult> {
+  const key = cacheKey(`web:${provider}`, provider, q);
+  const cached = cacheGet<{ results: GroundedSource[]; searchQueries: string[] }>(key);
+  if (cached) return { ...cached, attempts: 0 };
+  const { value: results, attempts } = await withRetryDetailed(() => callProvider(provider, q), `search.provider.${provider}`);
+  if (results.length === 0) {
+    return { results: [], searchQueries: [q], error: `${searchProviderLabel(provider)} returned no results`, attempts };
+  }
+  cacheSet(key, { results, searchQueries: [q] });
+  return { results, searchQueries: [q], attempts };
 }
 
 /** Never throws: upstream failures return no results and an `error` tagged "[CODE] ...". */

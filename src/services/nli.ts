@@ -22,7 +22,8 @@ export interface NLIBatchResult {
 /** Bumped from v1: v1 entries came from a non-deterministic (temperature != 0) judge. */
 const NLI_CACHE_KEY = 'groundcheck_nli_cache_v2';
 const MAX_PERSISTED_ENTRIES = 500;
-const DEFAULT_TIMEOUT_MS = 10_000;
+/** Per-attempt server timeout; one call may judge all top-3 chunks of a claim at once. */
+const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_CONCURRENCY = 4;
 /** Extra client-side allowance on top of the server's own per-call timeouts. */
 const NETWORK_SLACK_MS = 3_000;
@@ -225,8 +226,10 @@ export async function judgeEntailmentBatch(
   if (pending.length === 0) return results;
 
   const safeConcurrency = Math.max(1, Math.floor(concurrency));
-  // Server runs ceil(n / concurrency) sequential rounds, each bounded by its retry budget.
-  const batchTimeoutMs = Math.ceil(pending.length / safeConcurrency) * retryAwareTimeout(timeoutMs);
+  // The server judges all premises of one hypothesis in a single call, so it runs
+  // ceil(distinctHypotheses / concurrency) rounds, each bounded by its retry budget.
+  const distinctHypotheses = new Set(pending.map((x) => x.pair.hypothesis)).size;
+  const batchTimeoutMs = Math.ceil(distinctHypotheses / safeConcurrency) * retryAwareTimeout(timeoutMs);
 
   try {
     const data = await postJson(

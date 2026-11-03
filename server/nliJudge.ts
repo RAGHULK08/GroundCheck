@@ -3,6 +3,7 @@ import type { NLIProbabilities } from '../src/types/groundcheck';
 import { makeNeutralFallback, validateAndNormalizeScores } from '../src/services/nliScores.ts';
 import { GEMINI_CHAT_MODEL } from './config.ts';
 import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
+import { cacheGet, cacheKey, cacheSet } from './geminiCache.ts';
 
 /**
  * Server-side NLI judge: the only place that calls Gemini for entailment.
@@ -12,7 +13,9 @@ import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiR
 /** Kept for compatibility; the model name lives in server/config.ts. */
 export const NLI_MODEL = GEMINI_CHAT_MODEL;
 export const DEFAULT_NLI_CONCURRENCY = 4;
-export const DEFAULT_NLI_TIMEOUT_MS = 10_000;
+export const DEFAULT_NLI_TIMEOUT_MS = 15_000;
+/** Most premises judged against one hypothesis in a single Gemini call. */
+export const MAX_PREMISES_PER_CALL = 6;
 const MAX_NLI_CONCURRENCY = 8;
 const MIN_NLI_TIMEOUT_MS = 1_000;
 const MAX_NLI_TIMEOUT_MS = 30_000;
@@ -105,6 +108,9 @@ export async function judgePairStrict(
   if (!premise.trim() || !hypothesis.trim()) {
     return { result: makeNeutralFallback('Empty premise or hypothesis'), attempts: 0 };
   }
+  const key = nliCacheKey(premise, hypothesis);
+  const cached = cacheGet<NLIProbabilities>(key);
+  if (cached) return { result: { ...cached, attempts: 0 }, attempts: 0 };
   const { value: text, attempts } = await withRetryDetailed(
     () => callJudgeModel(ai, premise, hypothesis, timeoutMs),
     'nli.judge'
@@ -117,8 +123,136 @@ export async function judgePairStrict(
     return { result: { ...makeNeutralFallback(`NLI model returned invalid JSON: ${text.slice(0, 200)}`), attempts }, attempts };
   }
   const validation = validateAndNormalizeScores(parsed, NLI_MODEL);
+  if (validation.ok) cacheSet(key, validation.value);
   const result = validation.ok ? validation.value : makeNeutralFallback(validation.error);
   return { result: { ...result, attempts }, attempts };
+}
+
+function nliCacheKey(premise: string, hypothesis: string): string {
+  return cacheKey('nli', NLI_MODEL, premise.trim(), hypothesis.trim());
+}
+
+const MULTI_SYSTEM_INSTRUCTION = `${SYSTEM_INSTRUCTION}
+6. You will receive several numbered PREMISES and one HYPOTHESIS. Judge the hypothesis against EACH premise
+   separately and independently, as if the other premises did not exist. Return exactly one judgment per premise,
+   identified by its number.`;
+
+const MULTI_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    judgments: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          premise: { type: Type.INTEGER, description: 'Premise number (1-based)' },
+          ...RESPONSE_SCHEMA.properties,
+        },
+        required: ['premise', 'entailment', 'neutral', 'contradiction'],
+        propertyOrdering: ['premise', 'entailment', 'neutral', 'contradiction'],
+      },
+    },
+  },
+  required: ['judgments'],
+};
+
+/** One Gemini attempt judging several premises against one hypothesis. */
+async function callMultiJudgeModel(
+  ai: GoogleGenAI,
+  premises: readonly string[],
+  hypothesis: string,
+  timeoutMs: number
+): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const numbered = premises.map((p, i) => `PREMISE ${i + 1}:\n"""\n${p}\n"""`).join('\n\n');
+  try {
+    const response = await ai.models.generateContent({
+      model: NLI_MODEL,
+      contents: `${numbered}\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
+      config: {
+        systemInstruction: MULTI_SYSTEM_INSTRUCTION,
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: MULTI_RESPONSE_SCHEMA,
+        abortSignal: controller.signal,
+      },
+    });
+    return response.text?.trim() ?? '';
+  } catch (err) {
+    if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Pure: map a multi-premise response to one result per premise (error-flagged where missing/invalid). */
+export function parseMultiJudgments(text: string, count: number, attempts: number): NLIProbabilities[] {
+  const fail = (msg: string): NLIProbabilities[] =>
+    Array.from({ length: count }, () => ({ ...makeNeutralFallback(msg), attempts }));
+  if (!text) return fail('NLI model returned an empty response');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return fail(`NLI model returned invalid JSON: ${text.slice(0, 200)}`);
+  }
+  const list = typeof parsed === 'object' && parsed !== null ? (parsed as { judgments?: unknown }).judgments : undefined;
+  if (!Array.isArray(list)) return fail('NLI model response had no judgments array');
+  const byIndex = new Map<number, unknown>();
+  list.forEach((item, pos) => {
+    const n = typeof item === 'object' && item !== null ? (item as { premise?: unknown }).premise : undefined;
+    const idx = typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= count ? n - 1 : list.length === count ? pos : -1;
+    if (idx >= 0 && !byIndex.has(idx)) byIndex.set(idx, item);
+  });
+  return Array.from({ length: count }, (_, i) => {
+    const item = byIndex.get(i);
+    if (item === undefined) return { ...makeNeutralFallback(`NLI model returned no judgment for premise ${i + 1}`), attempts };
+    const validation = validateAndNormalizeScores(item, NLI_MODEL);
+    return validation.ok ? { ...validation.value, attempts } : { ...makeNeutralFallback(validation.error), attempts };
+  });
+}
+
+/**
+ * Judge several premises against one hypothesis in ONE Gemini call (the top-3 KB chunks
+ * or web snippets of a claim). Never throws; cached per pair; upstream failures give every
+ * premise an error-flagged neutral result with errorCode.
+ */
+export async function judgeHypothesisGroup(
+  ai: GoogleGenAI,
+  premises: readonly string[],
+  hypothesis: string,
+  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS
+): Promise<NLIProbabilities[]> {
+  if (premises.length === 1) return [await judgePair(ai, premises[0], hypothesis, timeoutMs)];
+  try {
+    const { value: text, attempts } = await withRetryDetailed(
+      () => callMultiJudgeModel(ai, premises, hypothesis, timeoutMs),
+      'nli.judge-group'
+    );
+    const results = parseMultiJudgments(text, premises.length, attempts);
+    results.forEach((r, i) => {
+      if (!r.error) {
+        const { attempts: _a, ...clean } = r;
+        cacheSet(nliCacheKey(premises[i], hypothesis), clean);
+      }
+    });
+    return results;
+  } catch (err) {
+    if (err instanceof UpstreamError) {
+      console.warn(`NLI group judgment failed: ${err.code} after ${err.attempts} attempt(s)`);
+      const failed: NLIProbabilities = {
+        ...makeNeutralFallback(`[${err.code}] ${err.message.slice(0, 400)}`),
+        errorCode: err.code,
+        attempts: err.attempts,
+      };
+      return premises.map(() => failed);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('NLI group judgment failed:', msg);
+    return premises.map(() => makeNeutralFallback(msg));
+  }
 }
 
 /**
@@ -145,8 +279,10 @@ export async function judgePair(
 }
 
 /**
- * Judge many pairs in parallel with a bounded worker pool and a per-call timeout.
- * Result order matches input order. Invalid entries get an error-flagged neutral result.
+ * Judge many pairs. Cached pairs are answered without a call; the rest are grouped by
+ * hypothesis so all premises for one claim go to Gemini in a single call (up to
+ * MAX_PREMISES_PER_CALL each). Groups run in a bounded worker pool. Result order matches
+ * input order. Invalid entries get an error-flagged neutral result.
  */
 export async function judgePairs(
   ai: GoogleGenAI,
@@ -157,23 +293,54 @@ export async function judgePairs(
   const timeoutMs = clampInt(options.timeoutMs, MIN_NLI_TIMEOUT_MS, MAX_NLI_TIMEOUT_MS, DEFAULT_NLI_TIMEOUT_MS);
   const results: NLIProbabilities[] = new Array(pairs.length);
 
+  const groups = new Map<string, { premise: string; index: number }[]>();
+  pairs.forEach((raw, i) => {
+    const pair = raw as Partial<Record<keyof NliPairInput, unknown>> | null;
+    if (!pair || typeof pair.premise !== 'string' || typeof pair.hypothesis !== 'string') {
+      results[i] = makeNeutralFallback('Invalid pair payload: premise and hypothesis must be strings');
+      return;
+    }
+    const premise = pair.premise.trim();
+    const hypothesis = pair.hypothesis.trim();
+    if (!premise || !hypothesis) {
+      results[i] = makeNeutralFallback('Empty premise or hypothesis');
+      return;
+    }
+    const cached = cacheGet<NLIProbabilities>(nliCacheKey(premise, hypothesis));
+    if (cached) {
+      results[i] = { ...cached, attempts: 0 };
+      return;
+    }
+    const list = groups.get(hypothesis) ?? [];
+    list.push({ premise, index: i });
+    groups.set(hypothesis, list);
+  });
+
+  const tasks: { hypothesis: string; items: { premise: string; index: number }[] }[] = [];
+  for (const [hypothesis, items] of groups) {
+    for (let k = 0; k < items.length; k += MAX_PREMISES_PER_CALL) {
+      tasks.push({ hypothesis, items: items.slice(k, k + MAX_PREMISES_PER_CALL) });
+    }
+  }
+
   let next = 0;
   const worker = async (): Promise<void> => {
-    while (next < pairs.length) {
-      const i = next++;
-      const pair = pairs[i] as Partial<Record<keyof NliPairInput, unknown>> | null;
-      if (!pair || typeof pair.premise !== 'string' || typeof pair.hypothesis !== 'string') {
-        results[i] = makeNeutralFallback('Invalid pair payload: premise and hypothesis must be strings');
-        continue;
-      }
-      results[i] = await judgePair(ai, pair.premise, pair.hypothesis, timeoutMs);
+    while (next < tasks.length) {
+      const task = tasks[next++];
+      const judged = await judgeHypothesisGroup(
+        ai,
+        task.items.map((x) => x.premise),
+        task.hypothesis,
+        timeoutMs
+      );
+      task.items.forEach((x, j) => {
+        results[x.index] = judged[j];
+      });
     }
   };
 
   const workers: Promise<void>[] = [];
-  for (let w = 0; w < Math.min(concurrency, pairs.length); w++) {
-    workers.push(worker());
-  }
+  for (let w = 0; w < Math.min(concurrency, tasks.length); w++) workers.push(worker());
   await Promise.all(workers);
   return results;
 }

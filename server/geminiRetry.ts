@@ -36,7 +36,68 @@ export class UpstreamError extends Error {
 export const MAX_ATTEMPTS = 4;
 export const BACKOFF_MS: readonly number[] = [1000, 2000, 4000, 8000];
 const MAX_JITTER_MS = 250;
-const MAX_QUOTA_WAIT_SECONDS = 60;
+/**
+ * A 429 is retried in place only when Gemini asks for a short wait. Longer waits (a
+ * per-day / per-minute quota window) trip the circuit breaker below instead, so calls
+ * fail fast rather than holding requests open past the browser's timeout.
+ */
+const MAX_QUOTA_WAIT_SECONDS = 10;
+/** Breaker duration when Gemini reports a quota error without a retry delay. */
+const DEFAULT_QUOTA_COOLDOWN_SECONDS = 60;
+
+/**
+ * Quota circuit breaker, one per quota pool ('chat' for generateContent, 'embed' for
+ * embedContent; they have separate Gemini quotas). While open, calls in that pool fail
+ * immediately with QUOTA_EXCEEDED and never reach Gemini, so an exhausted free tier is
+ * not hammered by every remaining claim, chunk and test case.
+ */
+const quotaBlockedUntil = new Map<string, { until: number; message: string }>();
+
+/**
+ * Quota pool for a call label: 'search' for external search providers (Tavily etc.),
+ * 'embed' for Gemini embeddings, 'chat' for every other Gemini call. Each pool has its
+ * own breaker, so an exhausted search plan never pauses KB checks and vice versa.
+ */
+export function quotaPoolOf(label: string): string {
+  if (label.startsWith('search.provider')) return 'search';
+  return label.startsWith('embed') ? 'embed' : 'chat';
+}
+
+/** Seconds until the pool's breaker closes, or 0 when calls are allowed. */
+export function quotaCooldownSeconds(pool: string, now: number = Date.now()): number {
+  const entry = quotaBlockedUntil.get(pool);
+  if (!entry || entry.until <= now) return 0;
+  return Math.ceil((entry.until - now) / 1000);
+}
+
+/** Test hook: close every breaker. */
+export function resetQuotaBreakers(): void {
+  quotaBlockedUntil.clear();
+}
+
+function formatWait(seconds: number): string {
+  if (seconds < 90) return `${Math.max(1, Math.round(seconds))} s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} min`;
+  return `${(seconds / 3600).toFixed(1)} h`;
+}
+
+/**
+ * Turn Gemini's long RESOURCE_EXHAUSTED JSON into one readable sentence, e.g.
+ * "Gemini quota exhausted (free tier: 20 requests, model gemini-3). Retry in ~67 min, ...".
+ */
+export function summarizeQuotaMessage(raw: string, retryAfterSeconds?: number): string {
+  const limit = /limit:\s*(\d+)/i.exec(raw)?.[1];
+  const model = /model:\s*([\w.-]+)/i.exec(raw)?.[1];
+  const freeTier = /free_tier/i.test(raw);
+  const details = [freeTier ? 'free tier' : '', limit ? `${limit} requests` : '', model ? `model ${model}` : '']
+    .filter(Boolean)
+    .join(', ');
+  const wait = retryAfterSeconds !== undefined ? ` Retry in ~${formatWait(retryAfterSeconds)}.` : '';
+  return (
+    `Gemini quota exhausted${details ? ` (${details})` : ''}.${wait} ` +
+    'Wait for the quota to reset, enable billing on the API key, or set GEMINI_CHAT_MODEL in .env to a model with more free quota (npm run models lists them).'
+  );
+}
 
 export interface RetryResult<T> {
   value: T;
@@ -70,6 +131,9 @@ export function parseRetryAfterSeconds(message: string): number | undefined {
 
 function statusOf(err: unknown): number | undefined {
   if (err instanceof ApiError && typeof err.status === 'number') return err.status;
+  // Any other error carrying an HTTP status (e.g. ProviderHttpError from a search provider).
+  const ownStatus = typeof err === 'object' && err !== null ? (err as { status?: unknown }).status : undefined;
+  if (typeof ownStatus === 'number' && ownStatus >= 100 && ownStatus < 600) return ownStatus;
   const msg = err instanceof Error ? err.message : String(err);
   const m = /"code"\s*:\s*(\d{3})/.exec(msg);
   return m ? Number(m[1]) : undefined;
@@ -79,14 +143,29 @@ function statusOf(err: unknown): number | undefined {
 export function classifyError(err: unknown): ClassifiedError {
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof UpstreamError) {
-    return { status: err.status, kind: 'fatal', code: err.code, message };
+    // Typed quota errors (e.g. a search provider's 429/432) still go through the quota
+    // path so they can trip the breaker; anything else typed is final.
+    return {
+      status: err.status,
+      kind: err.code === 'QUOTA_EXCEEDED' ? 'quota' : 'fatal',
+      code: err.code,
+      retryAfterSeconds: err.retryAfterSeconds,
+      message,
+    };
   }
   if (err instanceof AttemptTimeoutError || (err instanceof Error && err.name === 'AbortError')) {
     return { kind: 'retryable', code: 'TIMEOUT', message };
   }
   const status = statusOf(err);
   if (status === 429) {
-    return { status, kind: 'quota', code: 'QUOTA_EXCEEDED', retryAfterSeconds: parseRetryAfterSeconds(message), message };
+    const retryAfterSeconds = parseRetryAfterSeconds(message);
+    return {
+      status,
+      kind: 'quota',
+      code: 'QUOTA_EXCEEDED',
+      retryAfterSeconds,
+      message: summarizeQuotaMessage(message, retryAfterSeconds),
+    };
   }
   if (status === 500 || status === 503) return { status, kind: 'retryable', code: 'UPSTREAM_UNAVAILABLE', message };
   if (status === 504) return { status, kind: 'retryable', code: 'TIMEOUT', message };
@@ -104,7 +183,14 @@ function sleep(ms: number): Promise<void> {
 /** Like withRetry, but also reports how many attempts were needed. */
 export async function withRetryDetailed<T>(fn: () => Promise<T>, label: string): Promise<RetryResult<T>> {
   let quotaRetried = false;
+  const pool = quotaPoolOf(label);
   for (let attempt = 1; ; attempt++) {
+    const cooldown = quotaCooldownSeconds(pool);
+    if (cooldown > 0) {
+      // Breaker open: fail without calling Gemini. attempts counts real calls made.
+      const entry = quotaBlockedUntil.get(pool);
+      throw new UpstreamError('QUOTA_EXCEEDED', entry?.message ?? summarizeQuotaMessage('', cooldown), attempt - 1, 429, cooldown);
+    }
     try {
       return { value: await fn(), attempts: attempt };
     } catch (err) {
@@ -124,6 +210,11 @@ export async function withRetryDetailed<T>(fn: () => Promise<T>, label: string):
       }
 
       if (waitMs === undefined) {
+        if (c.kind === 'quota') {
+          const cooldownSeconds = c.retryAfterSeconds ?? DEFAULT_QUOTA_COOLDOWN_SECONDS;
+          quotaBlockedUntil.set(pool, { until: Date.now() + cooldownSeconds * 1000, message: c.message });
+          console.warn(`[quota] ${pool} calls paused for ${formatWait(cooldownSeconds)} after ${label}: QUOTA_EXCEEDED`);
+        }
         throw new UpstreamError(c.code, c.message, attempt, c.status, c.retryAfterSeconds);
       }
       console.warn(`[retry] ${label} status=${c.status ?? c.code} attempt=${attempt} wait=${waitMs}`);

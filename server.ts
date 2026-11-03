@@ -9,6 +9,7 @@ import { extractSearchTermsStrict } from './server/searchTerms.ts';
 import { searchWebGroundedStrict } from './server/webGrounding.ts';
 import { UpstreamError, httpStatusFor, upstreamErrorBody, withRetryDetailed } from './server/geminiRetry.ts';
 import { GEMINI_CHAT_MODEL, GEMINI_EMBED_MODEL } from './server/config.ts';
+import { SEARCH_PROVIDER, searchProviderConfigError, searchProviderLabel } from './server/searchProviders.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +40,19 @@ function requireEnv(name: string, placeholder?: string): string {
 // Shared server-side Gemini client
 const apiKey = requireEnv('GEMINI_API_KEY', 'your-gemini-api-key-here');
 console.log('GEMINI_API_KEY loaded from environment.');
+{
+  const searchProblem = searchProviderConfigError();
+  if (searchProblem) {
+    console.warn(`Web search: ${searchProblem}. Web search calls will fail until it is set.`);
+  } else {
+    console.log(
+      `Web search provider: ${searchProviderLabel()}` +
+        (SEARCH_PROVIDER === 'gemini'
+          ? ` (uses the ${GEMINI_CHAT_MODEL} quota; set TAVILY_API_KEY to switch to Tavily)`
+          : ' (separate quota from Gemini)')
+    );
+  }
+}
 const ai = new GoogleGenAI({
   apiKey,
   httpOptions: {
@@ -60,7 +74,11 @@ app.get('/api/health', (_req: Request, res: Response): void => {
  * Configured model names (no Gemini call). The client keys its embedding cache by the embed model.
  */
 app.get('/api/models', (_req: Request, res: Response): void => {
-  res.json({ chat: GEMINI_CHAT_MODEL, embed: GEMINI_EMBED_MODEL });
+  res.json({
+    chat: GEMINI_CHAT_MODEL,
+    embed: GEMINI_EMBED_MODEL,
+    search: { provider: SEARCH_PROVIDER, label: searchProviderLabel() },
+  });
 });
 
 /**

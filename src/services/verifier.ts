@@ -13,7 +13,7 @@ import { performWebSearchDetailed, WebSearchResult } from './webSearch';
 import { embedTexts, cosineSimilarity, EmbeddingError } from './embeddings';
 import { judgeEntailment, judgeEntailmentBatch } from './nli';
 import { findQuantityConflict, QuantityConflictResult } from './conflictCheck';
-import { classifyClaim, computeOverallVerdict, infrastructureFailure } from './claimClassifier';
+import { classifyClaim, computeOverallVerdict, infrastructureFailure, DecisionBasis } from './claimClassifier';
 import { buildSearchQuery, SearchQuery } from './queryBuilder';
 
 export interface SimilarityResult {
@@ -116,6 +116,13 @@ export interface WebEvidenceResult {
   /** Snippets dropped because they restate the claim or query. */
   echoesDiscarded: number;
 }
+
+/** KB decisions that never read web evidence (see decideStatus), so web search can be skipped. */
+const KB_DECISIVE_BASES: ReadonlySet<DecisionBasis> = new Set<DecisionBasis>([
+  'contradiction',
+  'kb-entailment',
+  'negation-entailment',
+]);
 
 /** Number of web snippets that get an NLI judgment. */
 export const WEB_NLI_TOP_K = 3;
@@ -310,19 +317,24 @@ export async function verifyResponse(
     // 3. Deterministic quantity check against the best-matching chunk only.
     const quantityConflict = checkBestChunkQuantityConflict(claim, top3Chunks[0]);
 
-    // 4. Grounded web evidence (lower trust), scored with embeddings + NLI.
-    const web = await gatherWebEvidence(prompt, claim, enableWebSearch);
-    if (enableWebSearch) didUseWebSearch = true;
+    // 4. Decide from the KB first. Web evidence is only consulted when the KB neither
+    //    contradicts nor supports the claim, so skipping the search in that case cannot
+    //    change the verdict; it saves 3+ Gemini calls (terms, grounded search, NLI) per claim.
+    const kbOnlyInput = { claim, top3Chunks, quantityConflict, threshold, promptKbScore };
+    const kbDecision = classifyClaim({ ...kbOnlyInput, web: { bestScore: 0, bestResult: null, matches: [] } });
+    const webSkipped = enableWebSearch && KB_DECISIVE_BASES.has(kbDecision.basis);
 
-    // 5. Pure decision.
-    const decision = classifyClaim({
-      claim,
-      top3Chunks,
-      quantityConflict,
-      threshold,
-      promptKbScore,
-      web: { bestScore: web.bestScore, bestResult: web.bestResult, matches: web.matches, error: web.error },
-    });
+    // 5. Grounded web evidence (lower trust), scored with embeddings + NLI.
+    const web = await gatherWebEvidence(prompt, claim, enableWebSearch && !webSkipped);
+    if (enableWebSearch && !webSkipped) didUseWebSearch = true;
+
+    // 6. Pure decision.
+    const decision = webSkipped
+      ? kbDecision
+      : classifyClaim({
+          ...kbOnlyInput,
+          web: { bestScore: web.bestScore, bestResult: web.bestResult, matches: web.matches, error: web.error },
+        });
     const analysis: ClaimAnalysis = {
       claimId: `clm-${cIdx + 1}`,
       text: claim,
@@ -342,8 +354,9 @@ export async function verifyResponse(
       webMatches: enableWebSearch ? web.matches : undefined,
       webSearchError: web.error,
       webEchoesDiscarded: web.echoesDiscarded > 0 ? web.echoesDiscarded : undefined,
+      webSkipped: webSkipped || undefined,
     };
-    analysis.infrastructureError = infrastructureFailure(analysis, enableWebSearch);
+    analysis.infrastructureError = infrastructureFailure(analysis, enableWebSearch && !webSkipped);
     claimsAnalysis.push(analysis);
 
     // A claim whose status depended on a failed upstream call is an infrastructure warning,

@@ -218,7 +218,7 @@ export const DrillDownInspector: React.FC<DrillDownInspectorProps> = ({
               {activeCheck.usedWebSearch && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950 border border-cyan-500/40 text-cyan-300">
                   <Globe className="w-3 h-3 text-cyan-400" />
-                  Google Search grounding used
+                  Web search used
                 </span>
               )}
             </div>

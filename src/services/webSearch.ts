@@ -3,7 +3,8 @@ import { fetchJson, formatApiError, tagUpstreamError } from './apiClient';
 /**
  * Web Search Service for GroundCheck.
  *
- * Retrieves real web sources through Gemini's Google Search grounding tool
+ * Retrieves real web sources from the server's search provider (Tavily, Brave, SearXNG,
+ * or Gemini's Google Search grounding tool; see server/searchProviders.ts)
  * (server-side, /api/search/web). Every result comes from the response's grounding
  * metadata: nothing is hardcoded and nothing is invented. On failure the result list
  * is empty and the failure is reported (console warning + `error` on the outcome).
@@ -67,7 +68,7 @@ async function fetchGrounded(query: string): Promise<WebSearchOutcome> {
 }
 
 /**
- * Search the web with Google Search grounding. Never throws.
+ * Search the web through the configured provider. Never throws.
  * Successful outcomes are cached in memory by query text; failures are not cached.
  */
 export async function performWebSearchDetailed(query: string): Promise<WebSearchOutcome> {

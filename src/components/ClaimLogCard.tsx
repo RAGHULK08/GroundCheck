@@ -2,6 +2,7 @@ import React from 'react';
 import { AlertTriangle, ArrowRight, CheckCircle, ExternalLink, Globe, HelpCircle, Layers, XCircle } from 'lucide-react';
 import { ChunkMatch, ClaimAnalysis, NLIProbabilities, WebEvidenceMatch } from '../types/groundcheck';
 import { WebSearchResult } from '../services/webSearch';
+import { useSearchProviderLabel } from '../services/searchProvider';
 
 /**
  * Presentational per-claim log: status, reason, top-3 KB chunks with similarity and
@@ -191,12 +192,27 @@ interface WebEvidenceSectionProps {
 
 const WebEvidenceSection: React.FC<WebEvidenceSectionProps> = ({ claim, webSearchEnabled }) => {
   const matches: WebEvidenceMatch[] = claim.webMatches ?? [];
+  const searchLabel = useSearchProviderLabel();
+  if (claim.webSkipped) {
+    return (
+      <div className="space-y-1.5 pt-1">
+        <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+          <Globe className="w-3 h-3 text-cyan-400" />
+          <span>Web evidence ({searchLabel}):</span>
+        </div>
+        <div className="p-2 rounded bg-slate-900 border border-slate-800/80 text-[11px] text-slate-500 italic">
+          Skipped: the knowledge base already {claim.isContradicted ? 'contradicts' : 'supports'} this claim, so web
+          evidence could not change the verdict.
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="space-y-1.5 pt-1">
       <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           <Globe className="w-3 h-3 text-cyan-400" />
-          <span>Web evidence (Google Search grounding):</span>
+          <span>Web evidence ({searchLabel}):</span>
         </div>
         {webSearchEnabled && (
           <span className="text-[10px] font-mono text-slate-500 normal-case">Best web match: {pct(claim.bestWebScore)}</span>

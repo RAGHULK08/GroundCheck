@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AlertTriangle, CheckCircle, FlaskConical, Play, XCircle } from 'lucide-react';
 import type { TestCaseResult, TestReport } from '../services/testRunner';
 import { ClaimLogCard } from './ClaimLogCard';
+import { useSearchProviderLabel } from '../services/searchProvider';
 
 /**
  * Presentational test-suite view. The parent runs the cases (testRunner.ts) and
@@ -46,6 +47,7 @@ const OutcomeBadge: React.FC<OutcomeBadgeProps> = ({ result }) => {
 
 export const TestSuitePanel: React.FC<TestSuitePanelProps> = ({ report, isRunning, progress, totalCases, onRun }) => {
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const searchLabel = useSearchProviderLabel();
 
   return (
     <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4 lg:p-5 space-y-4">
@@ -56,7 +58,7 @@ export const TestSuitePanel: React.FC<TestSuitePanelProps> = ({ report, isRunnin
             Labelled test cases ({totalCases})
           </h2>
           <p className="text-[11px] text-slate-400 mt-0.5">
-            Runs every case through the live verifier (Gemini embeddings, NLI and Google Search grounding) against the
+            Runs every case through the live verifier (Gemini embeddings and NLI, plus web search via {searchLabel}) against the
             default refund and shipping policies. Results are real model outputs and are not saved to the audit log.
           </p>
         </div>

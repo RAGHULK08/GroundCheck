@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { NLI_MODEL } from './nliJudge.ts';
 import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
+import { cacheGet, cacheKey, cacheSet } from './geminiCache.ts';
 
 /**
  * Server-side key-term extraction for web search queries.
@@ -106,6 +107,9 @@ export async function extractSearchTermsStrict(
   if (!prompt.trim()) {
     return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Empty prompt', attempts: 0 };
   }
+  const key = cacheKey('terms', SEARCH_TERMS_MODEL, normalizeSpaces(prompt));
+  const cached = cacheGet<string[]>(key);
+  if (cached) return { terms: cached, source: SEARCH_TERMS_MODEL, attempts: 0 };
   const { value: text, attempts } = await withRetryDetailed(() => callTermsModel(ai, prompt, timeoutMs), 'search.terms');
   if (!text) {
     return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Term extraction returned an empty response', attempts };
@@ -126,6 +130,7 @@ export async function extractSearchTermsStrict(
       attempts,
     };
   }
+  cacheSet(key, terms);
   return { terms, source: SEARCH_TERMS_MODEL, attempts };
 }
 

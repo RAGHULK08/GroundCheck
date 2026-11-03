@@ -6,3 +6,6 @@
 # Dependencies and build output
 node_modules/
 dist/
+
+# Server-side Gemini response cache
+.cache/

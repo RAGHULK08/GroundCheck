@@ -82,6 +82,8 @@ export interface ClaimAnalysis {
   webMatches?: WebEvidenceMatch[];
   /** Set when web search was enabled but failed or was unavailable. */
   webSearchError?: string;
+  /** Web search was not run because the KB alone decided the claim (contradicted or entailed). */
+  webSkipped?: boolean;
   /** Number of web snippets discarded because they restate the claim/query. */
   webEchoesDiscarded?: number;
   /**
