@@ -145,35 +145,35 @@ export const ModelComparisonView: React.FC<ModelComparisonViewProps> = ({
     setIsComparing(true);
     setLoggedToAudit(false);
 
-    // Simulated short processing latency for realistic async evaluation
-    await new Promise((resolve) => setTimeout(resolve, 400));
-
     const newEvals: Record<string, ModelEvaluationState> = {};
-
-    for (const model of selectedModels) {
-      const resp = modelResponses[model] || 'No response provided.';
-      try {
-        const { result, usedDocIds } = await verifyResponse(
-          prompt,
-          resp,
-          model,
-          kbDocs,
-          threshold,
-          true
-        );
-        newEvals[model] = {
-          modelName: model,
-          response: resp,
-          result,
-          usedDocIds,
-        };
-      } catch (e) {
-        console.error(`Evaluation failed for ${model}`, e);
+    try {
+      for (const model of selectedModels) {
+        const resp = modelResponses[model] || 'No response provided.';
+        try {
+          const { result, usedDocIds } = await verifyResponse(
+            prompt,
+            resp,
+            model,
+            kbDocs,
+            threshold,
+            true
+          );
+          newEvals[model] = {
+            modelName: model,
+            response: resp,
+            result,
+            usedDocIds,
+          };
+        } catch (e) {
+          console.error(`Evaluation failed for ${model}`, e);
+        }
       }
-    }
 
-    setEvaluations(newEvals);
-    setIsComparing(false);
+      setEvaluations(newEvals);
+    } finally {
+      // Loading state follows the real verification promises.
+      setIsComparing(false);
+    }
   };
 
   // Batch commit comparison checks to Exasol audit trail

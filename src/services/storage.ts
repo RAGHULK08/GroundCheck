@@ -25,131 +25,65 @@ export const INITIAL_DOCS: KnowledgeBaseDoc[] = [
   },
 ];
 
-export const INITIAL_CHECKS: CheckRecord[] = [
-  {
-    checkId: 'c1b489a2-9471-46df-a185-1d6ebfa77201',
-    prompt: 'What is our refund policy for electronics and digital downloads?',
-    response: 'Refunds are issued within 30 days, no questions asked. Digital products can also be refunded at any time as long as you provide the license key.',
-    modelName: 'gpt-4o',
-    verdict: 'HALLUCINATED',
-    confidenceScore: 0.3850,
-    flaggedSpans: [
-      {
-        text: 'Refunds are issued within 30 days, no questions asked.',
-        reason: 'Conflict in timeframe: claim states 30 days, which does not match source policy (similarity 0.38 < 0.60)',
-        closestDocId: 'doc-refund-001',
-        closestDocTitle: 'Refund Policy',
-        score: 0.38,
-      },
-      {
-        text: 'Digital products can also be refunded at any time as long as you provide the license key.',
-        reason: 'Contradiction: policy explicitly states digital products and gift cards are non-refundable (similarity 0.28 < 0.60)',
-        closestDocId: 'doc-refund-001',
-        closestDocTitle: 'Refund Policy',
-        score: 0.28,
-      },
-    ],
-    sourceDocIds: ['doc-refund-001'],
-    latencyMs: 142.5,
-    createdAt: '2026-10-30T14:22:10Z',
-  },
-  {
-    checkId: 'c2e994d3-1188-4bb8-8820-2df1176b9112',
-    prompt: 'How long does standard delivery take and is there a free shipping threshold?',
-    response: 'Standard shipping takes 3 to 5 business days within the country and is free on orders above 999 rupees. Tracking information is emailed to the customer once the order ships.',
-    modelName: 'claude-3-5-sonnet',
-    verdict: 'GROUNDED',
-    confidenceScore: 0.9420,
-    flaggedSpans: [],
-    sourceDocIds: ['doc-shipping-002'],
-    latencyMs: 118.2,
-    createdAt: '2026-10-30T16:45:00Z',
-  },
-  {
-    checkId: 'c3f101ab-7231-4821-99ee-341a998bc431',
-    prompt: 'Can you summarize our returns and shipping terms?',
-    response: 'Standard shipping takes 3 to 5 business days. Express shipping delivers within 1 to 2 business days. Customers can also return items within 60 days even without receipt.',
-    modelName: 'gemini-1.5-pro',
-    verdict: 'PARTIAL',
-    confidenceScore: 0.6840,
-    flaggedSpans: [
-      {
-        text: 'Customers can also return items within 60 days even without receipt.',
-        reason: 'Conflict in timeframe: claim states 60 days, which does not match source policy (similarity 0.34 < 0.60)',
-        closestDocId: 'doc-refund-001',
-        closestDocTitle: 'Refund Policy',
-        score: 0.34,
-      },
-    ],
-    sourceDocIds: ['doc-shipping-002', 'doc-refund-001'],
-    latencyMs: 135.0,
-    createdAt: '2026-10-31T09:12:30Z',
-  },
-  {
-    checkId: 'c4a558dc-8314-411a-821b-88a4421cc999',
-    prompt: 'Do you deliver internationally?',
-    response: 'International shipping is currently available to select countries and takes 7 to 14 business days. Tracking details will be emailed once dispatched.',
-    modelName: 'gpt-4o',
-    verdict: 'GROUNDED',
-    confidenceScore: 0.9150,
-    flaggedSpans: [],
-    sourceDocIds: ['doc-shipping-002'],
-    latencyMs: 98.4,
-    createdAt: '2026-10-31T11:04:12Z',
-  },
-  {
-    checkId: 'c5b882dd-9002-4fc3-a212-001229aa1482',
-    prompt: 'Can I return an item after 3 weeks?',
-    response: 'You can return items within 21 days for store credit, and return shipping is always covered by the seller.',
-    modelName: 'llama-3-70b',
-    verdict: 'HALLUCINATED',
-    confidenceScore: 0.3200,
-    flaggedSpans: [
-      {
-        text: 'You can return items within 21 days for store credit, and return shipping is always covered by the seller.',
-        reason: 'No supporting source found for 21 days store credit or seller-paid shipping (similarity 0.32 < 0.60)',
-        closestDocId: 'doc-refund-001',
-        closestDocTitle: 'Refund Policy',
-        score: 0.32,
-      },
-    ],
-    sourceDocIds: ['doc-refund-001'],
-    latencyMs: 154.2,
-    createdAt: '2026-11-01T08:30:00Z',
-  },
-  {
-    checkId: 'c6d441ae-2391-447a-8b1e-66a7781fbc02',
-    prompt: 'What are the rules for returning gift cards?',
-    response: 'Digital products and gift cards are non-refundable. Customers must contact support with their order number to initiate any return.',
-    modelName: 'claude-3-5-sonnet',
-    verdict: 'GROUNDED',
-    confidenceScore: 0.9650,
-    flaggedSpans: [],
-    sourceDocIds: ['doc-refund-001'],
-    latencyMs: 105.7,
-    createdAt: '2026-11-01T14:15:22Z',
-  },
-  {
-    checkId: 'c7e559ff-4311-4412-bc71-99882200aabb',
-    prompt: 'Tell me about express shipping and refunds processing time',
-    response: 'Express shipping delivers in 1 to 2 business days. Refunds are credited instantly to your bank account within 10 minutes of drop-off.',
-    modelName: 'gemini-1.5-pro',
-    verdict: 'PARTIAL',
-    confidenceScore: 0.6250,
-    flaggedSpans: [
-      {
-        text: 'Refunds are credited instantly to your bank account within 10 minutes of drop-off.',
-        reason: 'No supporting source found (source policy requires 5 to 7 business days after receipt) (similarity 0.27 < 0.60)',
-        closestDocId: 'doc-refund-001',
-        closestDocTitle: 'Refund Policy',
-        score: 0.27,
-      },
-    ],
-    sourceDocIds: ['doc-shipping-002', 'doc-refund-001'],
-    latencyMs: 122.9,
-    createdAt: '2026-11-02T07:20:00Z',
-  },
-];
+/**
+ * IDs of the demo audit records that earlier versions seeded into localStorage.
+ * Used only by the one-time migration below to remove them; real checks use
+ * crypto.randomUUID() and cannot collide with these fixed IDs.
+ */
+const LEGACY_SEEDED_CHECK_IDS: ReadonlySet<string> = new Set([
+  'c1b489a2-9471-46df-a185-1d6ebfa77201',
+  'c2e994d3-1188-4bb8-8820-2df1176b9112',
+  'c3f101ab-7231-4821-99ee-341a998bc431',
+  'c4a558dc-8314-411a-821b-88a4421cc999',
+  'c5b882dd-9002-4fc3-a212-001229aa1482',
+  'c6d441ae-2391-447a-8b1e-66a7781fbc02',
+  'c7e559ff-4311-4412-bc71-99882200aabb',
+]);
+
+const MIGRATIONS_STORAGE_KEY = 'groundcheck_migrations_v1';
+const MIGRATION_REMOVE_SEEDED_CHECKS = 'remove-seeded-demo-checks';
+
+function readCompletedMigrations(): string[] {
+  try {
+    const raw = localStorage.getItem(MIGRATIONS_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === 'string') : [];
+  } catch (e) {
+    console.warn('Failed reading storage migrations', e);
+    return [];
+  }
+}
+
+/**
+ * One-time migration: delete the previously seeded demo checks from stored checks,
+ * leaving every real check untouched. Marked done only after a successful write
+ * (or when there is nothing to migrate), so a failed attempt is retried next load.
+ */
+export function removeSeededDemoChecks(): number {
+  const done = readCompletedMigrations();
+  if (done.includes(MIGRATION_REMOVE_SEEDED_CHECKS)) return 0;
+  try {
+    const raw = localStorage.getItem(CHECKS_STORAGE_KEY);
+    let removed = 0;
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const kept = parsed.filter((c: unknown) => {
+          const id = typeof c === 'object' && c !== null ? (c as { checkId?: unknown }).checkId : undefined;
+          return !(typeof id === 'string' && LEGACY_SEEDED_CHECK_IDS.has(id));
+        });
+        removed = parsed.length - kept.length;
+        if (removed > 0) localStorage.setItem(CHECKS_STORAGE_KEY, JSON.stringify(kept));
+      }
+    }
+    localStorage.setItem(MIGRATIONS_STORAGE_KEY, JSON.stringify([...done, MIGRATION_REMOVE_SEEDED_CHECKS]));
+    if (removed > 0) console.info(`Removed ${removed} seeded demo check(s) from the local audit log.`);
+    return removed;
+  } catch (e) {
+    console.warn('Seeded demo check migration failed; it will be retried on next load', e);
+    return 0;
+  }
+}
 
 export function getThreshold(): number {
   try {
@@ -200,19 +134,18 @@ export function saveKnowledgeBase(docs: KnowledgeBaseDoc[]): void {
 }
 
 export function loadChecks(): CheckRecord[] {
+  removeSeededDemoChecks();
   try {
     const raw = localStorage.getItem(CHECKS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-    }
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as CheckRecord[];
+    console.warn('Stored checks are not an array; starting with an empty audit log (stored data left untouched).');
   } catch (e) {
-    console.warn('Failed to parse checks from storage', e);
+    // Do not overwrite unreadable data: leave it in storage so it can be inspected or recovered.
+    console.warn('Failed to parse checks from storage; starting with an empty audit log', e);
   }
-  saveChecks(INITIAL_CHECKS);
-  return INITIAL_CHECKS;
+  return [];
 }
 
 export function saveChecks(checks: CheckRecord[]): void {
@@ -230,11 +163,12 @@ export function appendCheck(check: CheckRecord): CheckRecord[] {
   return updated;
 }
 
+/** Reset to the default knowledge base, an EMPTY audit log and the default threshold. */
 export function resetAllData(): { kb: KnowledgeBaseDoc[]; checks: CheckRecord[] } {
   saveKnowledgeBase(INITIAL_DOCS);
-  saveChecks(INITIAL_CHECKS);
+  saveChecks([]);
   setThreshold(DEFAULT_THRESHOLD);
-  return { kb: INITIAL_DOCS, checks: INITIAL_CHECKS };
+  return { kb: INITIAL_DOCS, checks: [] };
 }
 
 /**

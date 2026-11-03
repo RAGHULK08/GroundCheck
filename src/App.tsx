@@ -93,9 +93,6 @@ export const App: React.FC = () => {
     setIsVerifying(true);
     setLatestResponseText(response);
 
-    // Give visual feedback for verification processing
-    await new Promise((resolve) => setTimeout(resolve, 350));
-
     try {
       const { result, usedDocIds } = await verifyResponse(
         prompt,
@@ -161,7 +158,7 @@ export const App: React.FC = () => {
   };
 
   const handleResetData = () => {
-    if (confirm('Reset all audit logs and knowledge base documents back to demo defaults?')) {
+    if (confirm('Delete all audit logs and restore the default knowledge base documents?')) {
       const reset = resetAllData();
       setKbDocs(reset.kb);
       setChecks(reset.checks);

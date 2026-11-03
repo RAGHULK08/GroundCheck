@@ -99,7 +99,7 @@ export const AuditTrailTable: React.FC<AuditTrailTableProps> = ({
         escapeCsv(c.modelName),
         escapeCsv(c.verdict),
         escapeCsv(c.confidenceScore.toFixed(4)),
-        escapeCsv((c.flaggedSpans?.length || 0) + (c.verdict === 'GROUNDED' ? 2 : 1)), // total claims approximation
+        escapeCsv(c.claimsAnalysis ? c.claimsAnalysis.length : ''), // real claim count; blank for records saved without a claim log
         escapeCsv(c.flaggedSpans?.length || 0),
         escapeCsv(flaggedReasons || 'None (fully grounded)'),
         escapeCsv(sourceDocs || 'N/A'),
@@ -350,6 +350,8 @@ export const AuditTrailTable: React.FC<AuditTrailTableProps> = ({
                     <div>
                       {searchQuery.trim()
                         ? `No audit logs found matching "${searchQuery}" in prompt text or model name.`
+                        : checks.length === 0
+                        ? 'No checks yet. Run a verification to start the audit trail.'
                         : 'No checks match the current filters.'}
                     </div>
                     {searchQuery.trim() && (

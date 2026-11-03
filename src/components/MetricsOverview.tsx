@@ -13,10 +13,16 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ checks }) => {
   const unverifiable = checks.filter((c) => c.verdict === 'UNVERIFIABLE').length;
   const hallucinated = checks.filter((c) => c.verdict === 'HALLUCINATED').length;
 
-  const hallucinationRate = total > 0 ? Math.round((hallucinated / total) * 100) : 0;
-  const groundedRate = total > 0 ? Math.round((grounded / total) * 100) : 0;
+  /** Share of all checks, or an em dash when there are no checks (never 0% / NaN). */
+  const share = (count: number): string => (total > 0 ? `${Math.round((count / total) * 100)}%` : '—');
 
   return (
+    <div className="space-y-2">
+    {total === 0 && (
+      <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-400">
+        No checks yet. Run a verification to populate these metrics.
+      </div>
+    )}
     <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 lg:gap-3.5">
       {/* Metric 1: Total Checks */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
@@ -43,7 +49,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ checks }) => {
         <div className="mt-2">
           <div className="text-2xl font-bold font-mono text-emerald-400 tracking-tight flex items-baseline gap-2">
             <span>{grounded}</span>
-            <span className="text-xs font-normal text-emerald-500/80">({groundedRate}%)</span>
+            <span className="text-xs font-normal text-emerald-500/80">({share(grounded)})</span>
           </div>
           <p className="text-[11px] text-slate-500 mt-0.5">
             Supported claims
@@ -61,7 +67,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ checks }) => {
           <div className="text-2xl font-bold font-mono text-amber-400 tracking-tight flex items-baseline gap-2">
             <span>{partial}</span>
             <span className="text-xs font-normal text-amber-500/80">
-              ({total > 0 ? Math.round((partial / total) * 100) : 0}%)
+              ({share(partial)})
             </span>
           </div>
           <p className="text-[11px] text-slate-500 mt-0.5">
@@ -80,7 +86,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ checks }) => {
           <div className="text-2xl font-bold font-mono text-amber-300 tracking-tight flex items-baseline gap-2">
             <span>{unverifiable}</span>
             <span className="text-xs font-normal text-amber-400/80">
-              ({total > 0 ? Math.round((unverifiable / total) * 100) : 0}%)
+              ({share(unverifiable)})
             </span>
           </div>
           <p className="text-[11px] text-amber-300/70 mt-0.5">
@@ -98,13 +104,14 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ checks }) => {
         <div className="mt-2">
           <div className="text-2xl font-bold font-mono text-rose-400 tracking-tight flex items-baseline gap-2">
             <span>{hallucinated}</span>
-            <span className="text-xs font-normal text-rose-500/80">({hallucinationRate}%)</span>
+            <span className="text-xs font-normal text-rose-500/80">({share(hallucinated)})</span>
           </div>
           <p className="text-[11px] text-slate-500 mt-0.5">
             Contradicted or covered topic unsupported
           </p>
         </div>
       </div>
+    </div>
     </div>
   );
 };
