@@ -92,11 +92,13 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
 
     const stringTexts = texts.map((t) => (typeof t === 'string' ? t : String(t)));
 
+    // One Content per text: gemini-embedding-2 is multimodal and would otherwise merge a
+    // string[] into a single multi-part input and return ONE embedding for all texts.
     const { value: response, attempts } = await withRetryDetailed(
       () =>
         ai.models.embedContent({
           model: GEMINI_EMBED_MODEL,
-          contents: stringTexts,
+          contents: stringTexts.map((text) => ({ parts: [{ text }] })),
         }),
       'embeddings'
     );
