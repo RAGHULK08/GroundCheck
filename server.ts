@@ -15,8 +15,25 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
+/**
+ * Read a required environment variable or exit with a clear message.
+ * The value is never logged. Placeholder values from .env.example count as unset.
+ */
+function requireEnv(name: string, placeholder?: string): string {
+  const value = process.env[name]?.trim();
+  if (!value || value === placeholder) {
+    console.error(
+      `Missing required environment variable ${name}. ` +
+        `Copy .env.example to .env and set ${name} (the npm scripts load .env automatically).`
+    );
+    process.exit(1);
+  }
+  return value;
+}
+
 // Shared server-side Gemini client
-const apiKey = process.env.GEMINI_API_KEY || '';
+const apiKey = requireEnv('GEMINI_API_KEY', 'your-gemini-api-key-here');
+console.log('GEMINI_API_KEY loaded from environment.');
 const ai = new GoogleGenAI({
   apiKey,
   httpOptions: {

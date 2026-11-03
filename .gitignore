@@ -1,0 +1,8 @@
+# Secrets: local env files (keep .env.example tracked)
+.env
+.env.local
+.env.*.local
+
+# Dependencies and build output
+node_modules/
+dist/
