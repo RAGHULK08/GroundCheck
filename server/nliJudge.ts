@@ -1,8 +1,8 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import type { NLIProbabilities } from '../src/types/groundcheck';
 import { makeNeutralFallback, validateAndNormalizeScores } from '../src/services/nliScores.ts';
-import { GEMINI_CHAT_MODEL } from './config.ts';
-import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
+import { GEMINI_CHAT_MODEL, GEMINI_CHAT_MODELS } from './config.ts';
+import { AttemptTimeoutError, UpstreamError, statusOf, withRetryDetailed } from './geminiRetry.ts';
 import { cacheGet, cacheKey, cacheSet } from './geminiCache.ts';
 
 /**
@@ -65,30 +65,33 @@ export interface NliJudgment {
 async function callJudgeModel(ai: GoogleGenAI, premise: string, hypothesis: string, timeoutMs: number): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let lastError: unknown;
   try {
-    const response = await ai.models.generateContent({
-      model: NLI_MODEL,
-      contents: `PREMISE:
-"""
-${premise}
-"""
-
-HYPOTHESIS:
-"""
-${hypothesis}
-"""`,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0,
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        abortSignal: controller.signal,
-      },
-    });
-    return response.text?.trim() ?? '';
-  } catch (err) {
-    if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
-    throw err;
+    for (const model of GEMINI_CHAT_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: `PREMISE:\n"""\n${premise}\n"""\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
+          config: {
+            systemInstruction: SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+            abortSignal: controller.signal,
+          },
+        });
+        return response.text?.trim() ?? '';
+      } catch (err) {
+        lastError = err;
+        if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
+        const status = statusOf(err);
+        if (status === 503 || status === 429 || status === 500 || status === 504) {
+          console.warn(`[nli] Model ${model} returned ${status}; trying next fallback model...`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
   } finally {
     clearTimeout(timer);
   }
@@ -166,22 +169,33 @@ async function callMultiJudgeModel(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const numbered = premises.map((p, i) => `PREMISE ${i + 1}:\n"""\n${p}\n"""`).join('\n\n');
+  let lastError: unknown;
   try {
-    const response = await ai.models.generateContent({
-      model: NLI_MODEL,
-      contents: `${numbered}\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
-      config: {
-        systemInstruction: MULTI_SYSTEM_INSTRUCTION,
-        temperature: 0,
-        responseMimeType: 'application/json',
-        responseSchema: MULTI_RESPONSE_SCHEMA,
-        abortSignal: controller.signal,
-      },
-    });
-    return response.text?.trim() ?? '';
-  } catch (err) {
-    if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
-    throw err;
+    for (const model of GEMINI_CHAT_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: `${numbered}\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
+          config: {
+            systemInstruction: MULTI_SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            responseSchema: MULTI_RESPONSE_SCHEMA,
+            abortSignal: controller.signal,
+          },
+        });
+        return response.text?.trim() ?? '';
+      } catch (err) {
+        lastError = err;
+        if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
+        const status = statusOf(err);
+        if (status === 503 || status === 429 || status === 500 || status === 504) {
+          console.warn(`[nli] Multi-model ${model} returned ${status}; trying next fallback model...`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
   } finally {
     clearTimeout(timer);
   }

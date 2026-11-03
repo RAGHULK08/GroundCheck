@@ -139,9 +139,14 @@ export async function fetchJson<T>(url: string, init: FetchJsonInit = {}): Promi
   const timer = timeoutMs !== undefined ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
   if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
 
+  const targetUrl =
+    typeof window === 'undefined' && !/^https?:\/\//i.test(url)
+      ? `http://localhost:3000${url.startsWith('/') ? '' : '/'}${url}`
+      : url;
+
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(targetUrl, {
       ...rest,
       headers: json !== undefined ? { 'Content-Type': 'application/json', ...headers } : headers,
       body: json !== undefined ? JSON.stringify(json) : undefined,

@@ -11,7 +11,7 @@ import { UpstreamError } from './geminiRetry.ts';
  * verifier are unaffected. Snippets are real page text from the search engine.
  */
 
-export type SearchProviderName = 'gemini' | 'tavily' | 'brave' | 'searxng';
+export type SearchProviderName = 'gemini' | 'tavily' | 'brave' | 'searxng' | 'duckduckgo';
 
 export interface ProviderSource {
   title: string;
@@ -30,6 +30,7 @@ const PROVIDER_LABEL: Record<SearchProviderName, string> = {
   tavily: 'Tavily',
   brave: 'Brave Search',
   searxng: 'SearXNG',
+  duckduckgo: 'DuckDuckGo',
 };
 
 function env(name: string): string | undefined {
@@ -40,9 +41,12 @@ function env(name: string): string | undefined {
 /** Resolve the configured provider (pure apart from reading env). */
 export function resolveSearchProvider(): SearchProviderName {
   const explicit = env('SEARCH_PROVIDER')?.toLowerCase();
-  if (explicit === 'gemini' || explicit === 'tavily' || explicit === 'brave' || explicit === 'searxng') return explicit;
+  if (explicit === 'gemini' || explicit === 'tavily' || explicit === 'brave' || explicit === 'searxng' || explicit === 'duckduckgo') return explicit;
   if (explicit) console.warn(`Unknown SEARCH_PROVIDER "${explicit}"; using auto-detection.`);
-  return env('TAVILY_API_KEY') ? 'tavily' : 'gemini';
+  if (env('TAVILY_API_KEY')) return 'tavily';
+  if (env('BRAVE_API_KEY')) return 'brave';
+  if (env('SEARXNG_URL')) return 'searxng';
+  return 'duckduckgo';
 }
 
 export const SEARCH_PROVIDER: SearchProviderName = resolveSearchProvider();
@@ -169,6 +173,33 @@ async function searchSearxng(query: string, signal: AbortSignal): Promise<Provid
   return normalizeSources((data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })));
 }
 
+async function searchDuckDuckGo(query: string, signal: AbortSignal): Promise<ProviderSource[]> {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    },
+    signal,
+  });
+  if (!res.ok) await failFromResponse('duckduckgo', res, [429]);
+  const html = await res.text();
+  const regex =
+    /<a class="result__url"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  let m: RegExpExecArray | null;
+  const items: { title?: string; url?: string; snippet?: string }[] = [];
+  while ((m = regex.exec(html)) !== null && items.length < MAX_SOURCES) {
+    const rawUrl = m[1].replace(/&amp;/g, '&');
+    const uddg = rawUrl.match(/uddg=([^&]+)/);
+    const decodedUrl = uddg ? decodeURIComponent(uddg[1]) : rawUrl;
+    items.push({
+      url: decodedUrl,
+      snippet: m[3],
+    });
+  }
+  return normalizeSources(items);
+}
+
 /** One search attempt against an external provider (not Gemini). */
 export function searchWithProvider(
   provider: Exclude<SearchProviderName, 'gemini'>,
@@ -182,5 +213,7 @@ export function searchWithProvider(
       return searchBrave(query, signal);
     case 'searxng':
       return searchSearxng(query, signal);
+    case 'duckduckgo':
+      return searchDuckDuckGo(query, signal);
   }
 }
