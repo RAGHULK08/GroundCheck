@@ -28,6 +28,8 @@ export interface NLIProbabilities {
   entailment: number;
   neutral: number;
   contradiction: number;
+  error?: string;
+  source?: string;
 }
 
 export interface ChunkMatch {

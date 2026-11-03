@@ -10,6 +10,12 @@ import {
   NLIProbabilities,
 } from '../types/groundcheck';
 import { performWebSearch, WebSearchResult } from './webSearch';
+import { embedTexts, cosineSimilarity, EmbeddingError } from './embeddings';
+import { judgeEntailment, judgeEntailmentBatch } from './nli';
+
+export interface SimilarityResult {
+  score: number;
+}
 
 /**
  * Split text into individual claims (sentences).
@@ -22,30 +28,6 @@ export function splitIntoClaims(text: string): string[] {
     .filter((s) => s.length > 0);
 
   return rawSentences;
-}
-
-/**
- * Tokenize and normalize text for vector computation.
- */
-function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^\w\s\d]/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length > 1);
-}
-
-/**
- * Generate subword n-grams (tri-grams) for robust semantic overlap.
- */
-function getNgrams(text: string): Map<string, number> {
-  const map = new Map<string, number>();
-  const normalized = ` ${text.toLowerCase().replace(/\s+/g, ' ').trim()} `;
-  for (let i = 0; i <= normalized.length - 3; i++) {
-    const gram = normalized.substring(i, i + 3);
-    map.set(gram, (map.get(gram) || 0) + 1);
-  }
-  return map;
 }
 
 /**
@@ -112,130 +94,33 @@ export function checkContradictions(
 }
 
 /**
- * Compute semantic similarity between a claim and a text chunk.
+ * Compute semantic similarity between two texts using real Gemini embeddings.
+ * Backed by embeddings.ts, returning { score: number }.
  */
-export function computeSimilarity(
+export async function computeSimilarity(
   claim: string,
   docContent: string
-): { score: number; contradictionReason?: string } {
-  const claimTokens = tokenize(claim);
-  const docTokens = tokenize(docContent);
-
-  if (claimTokens.length === 0 || docTokens.length === 0) {
-    return { score: 0 };
+): Promise<SimilarityResult> {
+  const vectors = await embedTexts([claim, docContent]);
+  if (!vectors[0] || !vectors[1]) {
+    throw new EmbeddingError('Failed to generate embeddings for similarity comparison');
   }
-
-  const docTokenSet = new Set(docTokens);
-  let tokenMatches = 0;
-  for (const token of claimTokens) {
-    if (docTokenSet.has(token)) {
-      tokenMatches++;
-    }
-  }
-  const tokenRecall = tokenMatches / claimTokens.length;
-
-  const claimGrams = getNgrams(claim);
-  const docGrams = getNgrams(docContent);
-
-  let dotProduct = 0;
-  let magClaim = 0;
-  let magDoc = 0;
-
-  for (const [, count] of claimGrams) {
-    magClaim += count * count;
-  }
-  for (const [, count] of docGrams) {
-    magDoc += count * count;
-  }
-
-  for (const [gram, count] of claimGrams) {
-    if (docGrams.has(gram)) {
-      dotProduct += count * docGrams.get(gram)!;
-    }
-  }
-
-  const gramSim =
-    magClaim > 0 && magDoc > 0 ? dotProduct / (Math.sqrt(magClaim) * Math.sqrt(magDoc)) : 0;
-
-  let rawScore = tokenRecall * 0.5 + gramSim * 0.5;
-
-  const sentencesInDoc = docContent
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((s) => s.trim().toLowerCase());
-  for (const s of sentencesInDoc) {
-    if (s.includes(claim.toLowerCase().replace(/[.!?]+$/, '')) || claim.toLowerCase().includes(s)) {
-      rawScore = Math.max(rawScore, 0.94);
-    }
-  }
-
-  const contradiction = checkContradictions(claim, docContent);
-  if (contradiction.contradicted) {
-    rawScore = Math.min(rawScore, 0.35);
-    return {
-      score: Math.max(0.05, Math.min(1.0, rawScore)),
-      contradictionReason: contradiction.penaltyReason,
-    };
-  }
-
+  const rawScore = cosineSimilarity(vectors[0], vectors[1]);
   return {
-    score: Math.max(0.05, Math.min(0.98, rawScore)),
+    score: Math.max(0, Math.min(1, rawScore)),
   };
 }
 
 /**
  * Natural Language Inference (NLI) model running between a premise (KB chunk) and hypothesis (claim).
- * Computes calibrated probabilities for Entailment, Neutral, and Contradiction.
+ * Thin async wrapper around judgeEntailment in nli.ts for backwards compatibility.
  */
-export function runNLIModel(
+export async function runNLIModel(
   premiseChunk: string,
   hypothesisClaim: string,
-  similarity: number
-): NLIProbabilities {
-  const contradictionCheck = checkContradictions(hypothesisClaim, premiseChunk);
-
-  if (contradictionCheck.contradicted) {
-    const pContradiction = 0.88 + Math.random() * 0.08;
-    const pNeutral = 0.08;
-    const pEntailment = Math.max(0.01, 1 - pContradiction - pNeutral);
-    return {
-      entailment: Math.round(pEntailment * 1000) / 1000,
-      neutral: Math.round(pNeutral * 1000) / 1000,
-      contradiction: Math.round((1 - pEntailment - pNeutral) * 1000) / 1000,
-    };
-  }
-
-  if (similarity >= 0.70) {
-    const pEntailment = Math.min(0.96, 0.65 + (similarity - 0.70) * 0.9);
-    const pNeutral = Math.max(0.03, (1 - pEntailment) * 0.85);
-    const pContradiction = Math.max(0.01, 1 - pEntailment - pNeutral);
-    return {
-      entailment: Math.round(pEntailment * 1000) / 1000,
-      neutral: Math.round(pNeutral * 1000) / 1000,
-      contradiction: Math.round((1 - pEntailment - pNeutral) * 1000) / 1000,
-    };
-  }
-
-  if (similarity >= 0.40) {
-    const pNeutral = 0.58 + (0.70 - similarity) * 0.4;
-    const pEntailment = Math.max(0.08, (similarity - 0.35) * 0.5);
-    const pContradiction = Math.max(0.02, 1 - pNeutral - pEntailment);
-    return {
-      entailment: Math.round(pEntailment * 1000) / 1000,
-      neutral: Math.round(pNeutral * 1000) / 1000,
-      contradiction: Math.round((1 - pNeutral - pEntailment) * 1000) / 1000,
-    };
-  }
-
-  // Low similarity (< 0.40): largely neutral
-  const pNeutral = Math.min(0.92, 0.75 + (0.40 - similarity) * 0.4);
-  const pEntailment = Math.max(0.02, similarity * 0.15);
-  const pContradiction = Math.max(0.02, 1 - pNeutral - pEntailment);
-
-  return {
-    entailment: Math.round(pEntailment * 1000) / 1000,
-    neutral: Math.round(pNeutral * 1000) / 1000,
-    contradiction: Math.round((1 - pNeutral - pEntailment) * 1000) / 1000,
-  };
+  _similarity?: number
+): Promise<NLIProbabilities> {
+  return judgeEntailment(premiseChunk, hypothesisClaim);
 }
 
 /**
@@ -286,10 +171,15 @@ export async function verifyResponse(
   const allChunks = extractKbChunks(kb);
   const claims = splitIntoClaims(response);
 
+  // Embed all KB chunks once per verification run (batched)
+  if (allChunks.length > 0) {
+    await embedTexts(allChunks.map((c) => c.text));
+  }
+
   // Compute question's (prompt's) top KB similarity
   let promptKbScore = 0;
   for (const chunk of allChunks) {
-    const { score } = computeSimilarity(prompt, chunk.text);
+    const { score } = await computeSimilarity(prompt, chunk.text);
     if (score > promptKbScore) {
       promptKbScore = score;
     }
@@ -305,28 +195,31 @@ export async function verifyResponse(
   for (let cIdx = 0; cIdx < claims.length; cIdx++) {
     const claim = claims[cIdx];
 
-    // 1. Rank all KB chunks by similarity to find the top 3 chunks
-    const chunkScores: { chunk: (typeof allChunks)[0]; score: number; contradictionReason?: string }[] = [];
+    // 1. Rank all KB chunks by similarity to find the top 3 chunks (claim is embedded on demand)
+    const chunkScores: { chunk: (typeof allChunks)[0]; score: number }[] = [];
     for (const chunk of allChunks) {
-      const { score, contradictionReason } = computeSimilarity(claim, chunk.text);
-      chunkScores.push({ chunk, score, contradictionReason });
+      const { score } = await computeSimilarity(claim, chunk.text);
+      chunkScores.push({ chunk, score });
     }
 
     chunkScores.sort((a, b) => b.score - a.score);
     const top3Scored = chunkScores.slice(0, 3);
 
     // 2. Run NLI model on the top 3 chunks regardless of similarity
-    const top3Chunks: ChunkMatch[] = top3Scored.map((item) => {
-      const nli = runNLIModel(item.chunk.text, claim, item.score);
-      return {
-        chunkId: item.chunk.chunkId,
-        docId: item.chunk.docId,
-        docTitle: item.chunk.docTitle,
-        text: item.chunk.text,
-        similarity: Math.round(item.score * 100) / 100,
-        nli,
-      };
-    });
+    const top3Pairs = top3Scored.map((item) => ({
+      premise: item.chunk.text,
+      hypothesis: claim,
+    }));
+    const top3NliResults = await judgeEntailmentBatch(top3Pairs);
+
+    const top3Chunks: ChunkMatch[] = top3Scored.map((item, idx) => ({
+      chunkId: item.chunk.chunkId,
+      docId: item.chunk.docId,
+      docTitle: item.chunk.docTitle,
+      text: item.chunk.text,
+      similarity: Math.round(item.score * 100) / 100,
+      nli: top3NliResults[idx],
+    }));
 
     const bestKbScore = top3Chunks.length > 0 ? top3Chunks[0].similarity : 0;
     if (top3Chunks.length > 0) {
@@ -336,14 +229,12 @@ export async function verifyResponse(
     // Check if any of top 3 chunks indicates contradiction
     let isContradicted = false;
     let contradictionReason = '';
-    for (let i = 0; i < top3Scored.length; i++) {
-      if (top3Scored[i].contradictionReason || top3Chunks[i].nli.contradiction >= 0.50) {
+    for (let i = 0; i < top3Chunks.length; i++) {
+      if (top3Chunks[i].nli.contradiction >= 0.50) {
         isContradicted = true;
-        contradictionReason =
-          top3Scored[i].contradictionReason ||
-          `Contradicted by KB evidence in ${top3Chunks[i].docTitle} (contradiction prob: ${(
-            top3Chunks[i].nli.contradiction * 100
-          ).toFixed(1)}%)`;
+        contradictionReason = `Contradicted by KB evidence in ${top3Chunks[i].docTitle} (contradiction prob: ${(
+          top3Chunks[i].nli.contradiction * 100
+        ).toFixed(1)}%)`;
         break;
       }
     }
@@ -358,7 +249,7 @@ export async function verifyResponse(
       try {
         webResults = await performWebSearch(`${prompt} ${claim}`.trim());
         for (const item of webResults) {
-          const { score: wScore } = computeSimilarity(claim, item.snippet);
+          const { score: wScore } = await computeSimilarity(claim, item.snippet);
           if (wScore > bestWebScore) {
             bestWebScore = Math.round(wScore * 100) / 100;
             bestWebResult = item;
@@ -488,9 +379,9 @@ export async function verifyResponse(
   const avgConfidence = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0.0;
   const latencyMs = Math.round((performance.now() - start) * 10) / 10;
   const checkId =
-    typeof crypto !== 'undefined' && crypto.randomUUID
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
-      : 'chk-' + Math.random().toString(36).substring(2, 11);
+      : `chk-${Date.now().toString(36)}-${performance.now().toString(36).replace('.', '')}`;
 
   return {
     result: {
