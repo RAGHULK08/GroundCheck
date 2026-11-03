@@ -1,3 +1,5 @@
+import { fetchJson, formatApiError, tagUpstreamError } from './apiClient';
+
 /**
  * Typed error for embedding operations
  */
@@ -79,6 +81,8 @@ function persistCache(): void {
 loadPersistedCache();
 
 let embedModelPromise: Promise<string> | null = null;
+const MODELS_TIMEOUT_MS = 5_000;
+const EMBED_TIMEOUT_MS = 30_000;
 
 /**
  * Embedding model configured on the server (GET /api/models; no Gemini call).
@@ -86,16 +90,14 @@ let embedModelPromise: Promise<string> | null = null;
  */
 export function getEmbedModel(): Promise<string> {
   if (!embedModelPromise) {
-    embedModelPromise = fetch('/api/models')
-      .then(async (res) => {
-        if (!res.ok) throw new EmbeddingError(`Model config endpoint error (${res.status})`);
-        const data = (await res.json()) as { embed?: unknown };
+    embedModelPromise = fetchJson<{ chat?: unknown; embed?: unknown }>('/api/models', { timeoutMs: MODELS_TIMEOUT_MS })
+      .then((data) => {
         if (typeof data.embed !== 'string' || !data.embed) throw new EmbeddingError('Model config missing embed model');
         return data.embed;
       })
       .catch((err: unknown) => {
         embedModelPromise = null;
-        throw err instanceof EmbeddingError ? err : new EmbeddingError(`Could not read model config: ${String(err)}`, err);
+        throw err instanceof EmbeddingError ? err : new EmbeddingError(`Could not read model config: ${formatApiError(err)}`, err);
       });
   }
   return embedModelPromise;
@@ -138,20 +140,18 @@ export function cosineSimilarity(a: number[], b: number[]): number {
  * Call server-side /api/embeddings route
  */
 async function callServerEmbeddings(texts: string[], expectedModel: string): Promise<number[][]> {
-  const res = await fetch('/api/embeddings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ texts }),
-  });
-
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new EmbeddingError(`Server embedding endpoint error (${res.status}): ${errorText}`);
+  let data: { embeddings?: number[][]; error?: string; model?: string };
+  try {
+    data = await fetchJson<{ embeddings?: number[][]; error?: string; model?: string }>('/api/embeddings', {
+      method: 'POST',
+      json: { texts },
+      timeoutMs: EMBED_TIMEOUT_MS,
+    });
+  } catch (err) {
+    throw new EmbeddingError(formatApiError(err), err);
   }
-
-  const data = (await res.json()) as { embeddings?: number[][]; error?: string; model?: string };
   if (data.error) {
-    throw new EmbeddingError(data.error);
+    throw new EmbeddingError(tagUpstreamError(data.error));
   }
   if (data.model !== expectedModel) {
     // Server config changed since the model was read: refuse to mix vectors from different models.

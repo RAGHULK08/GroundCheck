@@ -1,4 +1,5 @@
 import { NLIProbabilities } from '../types/groundcheck';
+import { fetchJson, formatApiError, tagUpstreamError } from './apiClient';
 import { makeNeutralFallback, validateAndNormalizeScores } from './nliScores';
 
 /**
@@ -121,33 +122,14 @@ function parseServerJudgment(raw: unknown): NLIProbabilities {
   const { error, source } = raw as { error?: unknown; source?: unknown };
   const src = typeof source === 'string' ? source : UNKNOWN_SOURCE;
   if (typeof error === 'string' && error) {
-    return makeNeutralFallback(error, src);
+    return makeNeutralFallback(tagUpstreamError(error), src);
   }
   const validation = validateAndNormalizeScores(raw, src);
   return validation.ok ? validation.value : makeNeutralFallback(`Server NLI response rejected: ${validation.error}`);
 }
 
 async function postJson(url: string, body: unknown, timeoutMs: number): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Server responded with ${res.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
-    }
-    return (await res.json()) as unknown;
-  } catch (err) {
-    if (controller.signal.aborted) throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
+  return fetchJson<unknown>(url, { method: 'POST', json: body, timeoutMs });
 }
 
 /**
@@ -172,7 +154,7 @@ export async function judgeEntailment(
     const data = await postJson('/api/nli/judge', { premise: p, hypothesis: h }, timeoutMs + NETWORK_SLACK_MS);
     result = parseServerJudgment(data);
   } catch (err) {
-    result = makeNeutralFallback(`NLI request failed: ${err instanceof Error ? err.message : String(err)}`);
+    result = makeNeutralFallback(formatApiError(err));
   }
 
   if (cacheIfValid(key, result)) persistNliCache();

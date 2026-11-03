@@ -8,7 +8,8 @@
     "build": "vite build",
     "start": "node --env-file-if-exists=.env server.ts",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "stop:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-dev.ps1"
   },
   "dependencies": {
     "@google/genai": "^2.32.0",

@@ -85,11 +85,19 @@ export const TestSuitePanel: React.FC<TestSuitePanelProps> = ({ report, isRunnin
         <>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-mono text-slate-300 bg-slate-950/70 p-3 rounded-lg border border-slate-800">
             <span>
-              Overall accuracy: <strong className="text-white text-sm">{pct(report.accuracy)}</strong> ({report.passed}/
-              {report.total})
+              {report.accuracy === null ? (
+                <strong className="text-amber-300 text-sm">
+                  {report.errored} error{report.errored === 1 ? '' : 's'}, 0 run (no accuracy)
+                </strong>
+              ) : (
+                <>
+                  Accuracy over cases that ran: <strong className="text-white text-sm">{pct(report.accuracy)}</strong> (
+                  {report.passed}/{report.ran})
+                </>
+              )}
             </span>
             <span className="text-rose-300">Failed: {report.failed}</span>
-            <span className="text-amber-300">Errors: {report.errored}</span>
+            <span className="text-amber-300">Errors (not scored): {report.errored}</span>
             {report.withWarnings > 0 && (
               <span className="text-amber-300" title="NLI or web search failures make these results unreliable">
                 With infra warnings: {report.withWarnings}
@@ -106,13 +114,28 @@ export const TestSuitePanel: React.FC<TestSuitePanelProps> = ({ report, isRunnin
                 <div className="text-[10px] font-mono text-slate-500 truncate" title={c.category}>
                   {c.category}
                 </div>
-                <div className="text-lg font-bold text-white">{pct(c.accuracy)}</div>
+                <div className="text-lg font-bold text-white">{c.accuracy === null ? '—' : pct(c.accuracy)}</div>
                 <div className="text-[10px] font-mono text-slate-400">
-                  {c.passed}/{c.total} passed{c.errored > 0 ? ` · ${c.errored} error` : ''}
+                  {c.ran > 0 ? `${c.passed}/${c.ran} passed` : 'none ran'}
+                  {c.errored > 0 ? ` · ${c.errored} error${c.errored === 1 ? '' : 's'}` : ''}
                 </div>
               </div>
             ))}
           </div>
+
+          {report.errorGroups.length > 0 && (
+            <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 text-xs space-y-1.5">
+              <div className="font-semibold text-amber-300">
+                Errors by cause (excluded from accuracy, never counted as verdicts):
+              </div>
+              {report.errorGroups.map((g) => (
+                <div key={g.message} className="font-mono text-[11px] text-amber-200/90 break-words">
+                  <span className="text-amber-300 font-bold">×{g.count}</span> {g.message}
+                  <span className="text-amber-400/60"> ({g.caseIds.join(', ')})</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="overflow-x-auto rounded-lg border border-slate-800">
             <table className="w-full text-xs">

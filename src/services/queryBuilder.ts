@@ -1,3 +1,5 @@
+import { fetchJson, formatApiError, tagUpstreamError } from './apiClient';
+
 /**
  * Web search query builder.
  *
@@ -62,33 +64,18 @@ export function composeSearchQuery(
 }
 
 async function fetchPromptTerms(prompt: string): Promise<PromptTerms> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TERMS_TIMEOUT_MS);
   try {
-    const res = await fetch('/api/search/terms', {
+    const data = await fetchJson<{ terms?: unknown; error?: unknown }>('/api/search/terms', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt }),
-      signal: controller.signal,
+      json: { prompt },
+      timeoutMs: TERMS_TIMEOUT_MS,
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { terms: [], error: `Term extraction failed with ${res.status}${body ? `: ${body.slice(0, 200)}` : ''}` };
-    }
-    const data = (await res.json()) as { terms?: unknown; error?: unknown };
-    if (typeof data.error === 'string' && data.error) return { terms: [], error: data.error };
+    if (typeof data.error === 'string' && data.error) return { terms: [], error: tagUpstreamError(data.error) };
     const terms = Array.isArray(data.terms) ? data.terms.filter((t): t is string => typeof t === 'string') : [];
     if (terms.length === 0) return { terms: [], error: 'Term extraction returned no terms' };
     return { terms };
   } catch (err) {
-    const msg = controller.signal.aborted
-      ? `Term extraction timed out after ${TERMS_TIMEOUT_MS}ms`
-      : err instanceof Error
-      ? err.message
-      : String(err);
-    return { terms: [], error: msg };
-  } finally {
-    clearTimeout(timer);
+    return { terms: [], error: formatApiError(err) };
   }
 }
 

@@ -1,3 +1,5 @@
+import { fetchJson, formatApiError, tagUpstreamError } from './apiClient';
+
 /**
  * Web Search Service for GroundCheck.
  *
@@ -44,37 +46,22 @@ function isWebSearchResult(v: unknown): v is WebSearchResult {
 }
 
 async function fetchGrounded(query: string): Promise<WebSearchOutcome> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
   try {
-    const res = await fetch('/api/search/web', {
+    const data = await fetchJson<{ results?: unknown; searchQueries?: unknown; error?: unknown }>('/api/search/web', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-      signal: controller.signal,
+      json: { query },
+      timeoutMs: CLIENT_TIMEOUT_MS,
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { results: [], searchQueries: [], error: `Web search failed with ${res.status}${body ? `: ${body.slice(0, 200)}` : ''}` };
-    }
-    const data = (await res.json()) as { results?: unknown; searchQueries?: unknown; error?: unknown };
     const searchQueries = Array.isArray(data.searchQueries)
       ? data.searchQueries.filter((q): q is string => typeof q === 'string')
       : [];
     if (typeof data.error === 'string' && data.error) {
-      return { results: [], searchQueries, error: data.error };
+      return { results: [], searchQueries, error: tagUpstreamError(data.error) };
     }
     const results = Array.isArray(data.results) ? data.results.filter(isWebSearchResult) : [];
     return { results, searchQueries };
   } catch (err) {
-    const msg = controller.signal.aborted
-      ? `Web search timed out after ${CLIENT_TIMEOUT_MS}ms`
-      : err instanceof Error
-      ? err.message
-      : String(err);
-    return { results: [], searchQueries: [], error: msg };
-  } finally {
-    clearTimeout(timer);
+    return { results: [], searchQueries: [], error: formatApiError(err) };
   }
 }
 

@@ -17,6 +17,9 @@ import {
 
 export type TestOutcome = 'pass' | 'fail' | 'error';
 
+/** Why a case counts as an error instead of a pass/fail. */
+export type TestErrorKind = 'exception' | 'infrastructure';
+
 export interface TestCaseResult {
   testCase: VerifierTestCase;
   outcome: TestOutcome;
@@ -28,7 +31,18 @@ export interface TestCaseResult {
   claim?: ClaimAnalysis;
   /** Infrastructure problems that make this result unreliable (NLI/search failures, claim split). */
   warnings: string[];
+  /** Set when outcome is 'error'. */
+  errorKind?: TestErrorKind;
+  /** The error that prevented a real verdict (used for grouping); set when outcome is 'error'. */
+  errorMessage?: string;
   durationMs: number;
+}
+
+/** One root cause shown once, with the cases it affected. */
+export interface ErrorGroup {
+  message: string;
+  count: number;
+  caseIds: string[];
 }
 
 export interface CategoryAccuracy {
@@ -37,8 +51,10 @@ export interface CategoryAccuracy {
   passed: number;
   failed: number;
   errored: number;
-  /** passed / total, 0..1. */
-  accuracy: number;
+  /** Cases that produced a real verdict (passed + failed). */
+  ran: number;
+  /** passed / ran, 0..1; null when no case in this category ran. */
+  accuracy: number | null;
 }
 
 export interface TestReport {
@@ -49,11 +65,15 @@ export interface TestReport {
   passed: number;
   failed: number;
   errored: number;
-  /** passed / total, 0..1 (errors count as not passed). */
-  accuracy: number;
+  /** Cases that produced a real verdict (passed + failed). Errors are excluded from accuracy. */
+  ran: number;
+  /** passed / ran, 0..1; null when no case ran (never reported as 0%). */
+  accuracy: number | null;
   /** Cases whose result carries an infrastructure warning. */
   withWarnings: number;
   byCategory: CategoryAccuracy[];
+  /** Errored cases grouped by message, most frequent first. */
+  errorGroups: ErrorGroup[];
   results: TestCaseResult[];
 }
 
@@ -82,6 +102,23 @@ export function collectWarnings(claim: ClaimAnalysis, claimCount: number): strin
   return warnings;
 }
 
+/**
+ * Pure: the infrastructure failure that the claim's verdict depended on, if any.
+ * A verdict decided by KB evidence (contradiction or a supporting chunk) uses only
+ * successful judgments, so it stands; otherwise any failed NLI or web call means the
+ * status may be an artefact of the outage and must not be scored.
+ */
+export function infrastructureFailure(claim: ClaimAnalysis, webEnabled: boolean): string | undefined {
+  const decidedByKb = claim.isContradicted || claim.supportingChunkId !== undefined;
+  if (decidedByKb) return undefined;
+  const kbNli = claim.top3Chunks.find((c) => c.nli.error)?.nli.error;
+  if (kbNli) return kbNli;
+  if (!webEnabled) return undefined;
+  if (claim.webSearchError) return claim.webSearchError;
+  const webNli = (claim.webMatches ?? []).find((m) => m.nli?.error)?.nli?.error;
+  return webNli;
+}
+
 async function runOne(
   testCase: VerifierTestCase,
   kb: KnowledgeBaseDoc[],
@@ -103,8 +140,25 @@ async function runOne(
       return {
         testCase,
         outcome: 'error',
+        errorKind: 'exception',
+        errorMessage: 'Verifier returned no claims for this case',
         reason: 'Verifier returned no claims for this case',
         warnings: [],
+        durationMs: elapsed(),
+      };
+    }
+    const infra = infrastructureFailure(claim, testCase.enableWebSearch === true);
+    if (infra) {
+      return {
+        testCase,
+        outcome: 'error',
+        errorKind: 'infrastructure',
+        errorMessage: infra,
+        actual: claim.status,
+        reason: `Not scored: verdict depended on a failed upstream call (${infra.slice(0, 160)})`,
+        isContradicted: claim.isContradicted,
+        claim,
+        warnings: collectWarnings(claim, result.claimsAnalysis.length),
         durationMs: elapsed(),
       };
     }
@@ -121,11 +175,33 @@ async function runOne(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`Test case ${testCase.id} failed to run:`, msg);
-    return { testCase, outcome: 'error', reason: `Verifier threw: ${msg}`, warnings: [], durationMs: elapsed() };
+    return {
+      testCase,
+      outcome: 'error',
+      errorKind: 'exception',
+      errorMessage: msg,
+      reason: `Verifier threw: ${msg}`,
+      warnings: [],
+      durationMs: elapsed(),
+    };
   }
 }
 
-/** Pure: aggregate per-case results into a report. */
+/** Pure: group errored cases by message so one root cause is one line. */
+export function groupErrors(results: TestCaseResult[]): ErrorGroup[] {
+  const groups = new Map<string, ErrorGroup>();
+  for (const r of results) {
+    if (r.outcome !== 'error') continue;
+    const message = (r.errorMessage ?? r.reason).replace(/\s+/g, ' ').trim().slice(0, 300);
+    const g = groups.get(message) ?? { message, count: 0, caseIds: [] };
+    g.count += 1;
+    g.caseIds.push(r.testCase.id);
+    groups.set(message, g);
+  }
+  return Array.from(groups.values()).sort((a, b) => b.count - a.count);
+}
+
+/** Pure: aggregate per-case results into a report. Accuracy is computed only over cases that ran. */
 export function summarize(
   results: TestCaseResult[],
   threshold: number,
@@ -133,33 +209,38 @@ export function summarize(
   durationMs: number
 ): TestReport {
   const count = (list: TestCaseResult[], o: TestOutcome): number => list.filter((r) => r.outcome === o).length;
-  const ratio = (n: number, d: number): number => (d > 0 ? n / d : 0);
+  const ratio = (n: number, d: number): number | null => (d > 0 ? n / d : null);
 
   const byCategory: CategoryAccuracy[] = TEST_CASE_CATEGORIES.map((category) => {
     const inCat = results.filter((r) => r.testCase.category === category);
     const passed = count(inCat, 'pass');
+    const failed = count(inCat, 'fail');
     return {
       category,
       total: inCat.length,
       passed,
-      failed: count(inCat, 'fail'),
+      failed,
       errored: count(inCat, 'error'),
-      accuracy: ratio(passed, inCat.length),
+      ran: passed + failed,
+      accuracy: ratio(passed, passed + failed),
     };
   }).filter((c) => c.total > 0);
 
   const passed = count(results, 'pass');
+  const failed = count(results, 'fail');
   return {
     startedAt,
     durationMs,
     threshold,
     total: results.length,
     passed,
-    failed: count(results, 'fail'),
+    failed,
     errored: count(results, 'error'),
-    accuracy: ratio(passed, results.length),
+    ran: passed + failed,
+    accuracy: ratio(passed, passed + failed),
     withWarnings: results.filter((r) => r.warnings.length > 0).length,
     byCategory,
+    errorGroups: groupErrors(results),
     results,
   };
 }
