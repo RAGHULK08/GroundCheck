@@ -25,6 +25,8 @@ interface RunCheckPanelProps {
   isVerifying: boolean;
   latestResult: VerificationResult | null;
   latestResponseText: string;
+  /** Check-level failure (e.g. backend or embeddings unavailable); shown instead of a verdict. */
+  errorMessage?: string | null;
 }
 
 const PRESET_EXAMPLES = [
@@ -71,6 +73,7 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
   onRunCheck,
   isVerifying,
   latestResult,
+  errorMessage,
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const [prompt, setPrompt] = useState(PRESET_EXAMPLES[0].prompt);
@@ -269,6 +272,15 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
           </div>
 
           {/* Validation Error Message */}
+          {errorMessage && (
+            <div className="p-2.5 rounded-lg bg-amber-950/60 border border-amber-500/40 text-amber-300 text-xs flex items-start gap-2 break-words">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                <strong>Verification could not run (infrastructure):</strong> {errorMessage}
+              </span>
+            </div>
+          )}
+
           {validationError && (
             <div className="p-2.5 rounded-lg bg-amber-950/60 border border-amber-500/40 text-amber-300 text-xs flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -310,7 +322,18 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
                     Verdict:
                   </span>
-                  {getVerdictBadge(latestResult.verdict)}
+                  {latestResult.numClaims > 0 && latestResult.infrastructureErrors === latestResult.numClaims ? (
+                    <FlagChip label="NOT VERIFIED: every claim hit an infrastructure error" />
+                  ) : (
+                    getVerdictBadge(latestResult.verdict)
+                  )}
+                  {latestResult.infrastructureErrors !== undefined &&
+                    latestResult.infrastructureErrors > 0 &&
+                    latestResult.infrastructureErrors < latestResult.numClaims && (
+                      <FlagChip
+                        label={`${latestResult.infrastructureErrors} claim(s) not verified (infrastructure); verdict covers the rest`}
+                      />
+                    )}
 
                   {latestResult.usedWebSearch && (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-mono font-medium bg-cyan-950/80 border border-cyan-500/40 text-cyan-300">

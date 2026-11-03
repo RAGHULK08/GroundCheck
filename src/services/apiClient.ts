@@ -16,21 +16,90 @@ export type ApiErrorCode =
   | 'BACKEND_UNREACHABLE' // network error: server not running
   | 'NOT_FOUND'
   | 'BAD_REQUEST'
-  | 'INVALID_RESPONSE' // JSON content-type but unparseable body
+  | 'AUTH' // Gemini rejected the API key / permissions
+  | 'INVALID_RESPONSE' // unparseable or malformed body
+  | 'INTERNAL_ERROR' // backend bug, reported with its message
   | 'HTTP_ERROR';
+
+/** Codes the backend may put in { error: <code> } bodies; used as-is when present. */
+const SERVER_CODES: ReadonlySet<string> = new Set<ApiErrorCode>([
+  'QUOTA_EXCEEDED',
+  'UPSTREAM_UNAVAILABLE',
+  'TIMEOUT',
+  'BAD_REQUEST',
+  'AUTH',
+  'INVALID_RESPONSE',
+  'INTERNAL_ERROR',
+  'NOT_FOUND',
+]);
+
+/** Infrastructure failures: an outage or quota, never evidence about a claim. */
+export const INFRASTRUCTURE_CODES: ReadonlySet<string> = new Set<ApiErrorCode>([
+  'QUOTA_EXCEEDED',
+  'UPSTREAM_UNAVAILABLE',
+  'TIMEOUT',
+  'HTML_RESPONSE',
+  'BACKEND_UNREACHABLE',
+  'AUTH',
+  'INVALID_RESPONSE',
+  'INTERNAL_ERROR',
+  'NOT_FOUND',
+]);
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status?: number;
   readonly url: string;
+  /** Upstream attempts reported by the backend, when known. */
+  readonly attempts?: number;
+  /** Server-suggested wait (e.g. quota reset), when known. */
+  readonly retryAfterSeconds?: number;
 
-  constructor(code: ApiErrorCode, url: string, message: string, status?: number) {
+  constructor(
+    code: ApiErrorCode,
+    url: string,
+    message: string,
+    status?: number,
+    attempts?: number,
+    retryAfterSeconds?: number
+  ) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.url = url;
     this.status = status;
+    this.attempts = attempts;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
+}
+
+interface ErrorBody {
+  code?: string;
+  message: string;
+  attempts?: number;
+  retryAfterSeconds?: number;
+}
+
+/** Parse { error, message, attempts, retryAfterSeconds } (or any JSON / text) from an error response. */
+function parseErrorBody(bodyText: string): ErrorBody {
+  try {
+    const parsed: unknown = JSON.parse(bodyText);
+    if (typeof parsed === 'object' && parsed !== null) {
+      const b = parsed as { error?: unknown; message?: unknown; attempts?: unknown; retryAfterSeconds?: unknown };
+      const code = typeof b.error === 'string' && SERVER_CODES.has(b.error) ? b.error : undefined;
+      const message =
+        typeof b.message === 'string' ? b.message : typeof b.error === 'string' ? b.error : JSON.stringify(b.error ?? parsed);
+      return {
+        code,
+        message,
+        attempts: typeof b.attempts === 'number' ? b.attempts : undefined,
+        retryAfterSeconds: typeof b.retryAfterSeconds === 'number' ? b.retryAfterSeconds : undefined,
+      };
+    }
+  } catch {
+    // not JSON
+  }
+  return { message: bodyText };
 }
 
 export interface FetchJsonInit extends Omit<RequestInit, 'body'> {
@@ -61,20 +130,6 @@ function codeForStatus(status: number, bodyText: string): ApiErrorCode {
   if (status === 400) return 'BAD_REQUEST';
   if (status === 502 || status === 503) return 'UPSTREAM_UNAVAILABLE';
   return classifyUpstreamText(bodyText) ?? (status >= 500 ? 'UPSTREAM_UNAVAILABLE' : 'HTTP_ERROR');
-}
-
-function errorMessageFromBody(bodyText: string): string {
-  try {
-    const parsed: unknown = JSON.parse(bodyText);
-    if (typeof parsed === 'object' && parsed !== null) {
-      const e = (parsed as { error?: unknown }).error;
-      if (typeof e === 'string') return e;
-      if (e !== undefined) return JSON.stringify(e);
-    }
-  } catch {
-    // not JSON; fall through
-  }
-  return bodyText;
 }
 
 /** Fetch an /api route and parse its JSON body. Throws ApiError on any failure. */
@@ -121,8 +176,18 @@ export async function fetchJson<T>(url: string, init: FetchJsonInit = {}): Promi
   }
 
   if (!res.ok) {
-    const detail = errorMessageFromBody(bodyText);
-    throw new ApiError(codeForStatus(res.status, detail), url, `API route ${url} failed with status ${res.status}: ${detail.slice(0, 300)}`, res.status);
+    const body = parseErrorBody(bodyText);
+    const code = (body.code as ApiErrorCode | undefined) ?? codeForStatus(res.status, body.message);
+    const attemptsNote = body.attempts !== undefined ? ` after ${body.attempts} attempt(s)` : '';
+    const retryNote = body.retryAfterSeconds !== undefined ? ` (retry after ~${body.retryAfterSeconds}s)` : '';
+    throw new ApiError(
+      code,
+      url,
+      `API route ${url} failed with status ${res.status}${attemptsNote}${retryNote}: ${body.message.slice(0, 300)}`,
+      res.status,
+      body.attempts,
+      body.retryAfterSeconds
+    );
   }
 
   try {
@@ -138,6 +203,12 @@ export function formatApiError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   const code = classifyUpstreamText(msg);
   return code ? `[${code}] ${msg}` : msg;
+}
+
+/** Typed code at the start of a "[CODE] message" string, if any. */
+export function errorCodeOf(message: string | undefined): string | undefined {
+  const m = message ? /^\[([A-Z_]+)\]/.exec(message) : null;
+  return m ? m[1] : undefined;
 }
 
 /** Tag an upstream error string relayed inside a 200 response (e.g. { error: "..." }) with its code. */

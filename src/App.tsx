@@ -45,6 +45,7 @@ export const App: React.FC = () => {
   const [isVerifying, setIsVerifying] = useState(false);
   const [latestResult, setLatestResult] = useState<VerificationResult | null>(null);
   const [latestResponseText, setLatestResponseText] = useState<string>('');
+  const [verifyError, setVerifyError] = useState<string | null>(null);
 
   const [isKbModalOpen, setIsKbModalOpen] = useState(false);
   const [isSchemaModalOpen, setIsSchemaModalOpen] = useState(false);
@@ -92,6 +93,7 @@ export const App: React.FC = () => {
   ) => {
     setIsVerifying(true);
     setLatestResponseText(response);
+    setVerifyError(null);
 
     try {
       const { result, usedDocIds } = await verifyResponse(
@@ -117,15 +119,22 @@ export const App: React.FC = () => {
         citations: result.citations,
         usedWebSearch: result.usedWebSearch,
         claimsAnalysis: result.claimsAnalysis,
+        infrastructureErrors: result.infrastructureErrors,
       };
 
+      setLatestResult(result);
+      // A check where nothing could be verified is an outage, not an audit result: don't log it.
+      if (result.numClaims > 0 && result.infrastructureErrors === result.numClaims) {
+        setVerifyError('No claim could be verified because upstream calls failed; this check was not saved to the audit log.');
+        return result;
+      }
       const updated = appendCheck(newRecord);
       setChecks(updated);
-      setLatestResult(result);
       setSelectedCheckId(result.checkId);
       return result;
     } catch (err) {
       console.error('Verification failed', err);
+      setVerifyError(err instanceof Error ? err.message : String(err));
       return null;
     } finally {
       setIsVerifying(false);
@@ -241,6 +250,7 @@ export const App: React.FC = () => {
             isVerifying={isVerifying}
             latestResult={latestResult}
             latestResponseText={latestResponseText}
+            errorMessage={verifyError}
           />
         ) : activeView === 'tests' ? (
           <TestSuitePanel

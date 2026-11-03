@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { NLI_MODEL } from './nliJudge.ts';
+import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
 
 /**
  * Server-side key-term extraction for web search queries.
@@ -17,6 +18,10 @@ export interface SearchTermsResult {
   terms: string[];
   source: string;
   error?: string;
+  /** Typed upstream code when the failure was an upstream outage (non-throwing wrapper only). */
+  errorCode?: string;
+  /** Gemini attempts used. */
+  attempts?: number;
 }
 
 const SYSTEM_INSTRUCTION = `You extract search keywords.
@@ -64,16 +69,8 @@ export function filterTermsAgainstPrompt(raw: unknown, prompt: string): string[]
   return out;
 }
 
-/** Never throws: failures return no terms and an `error` message. */
-export async function extractSearchTerms(
-  ai: GoogleGenAI,
-  prompt: string,
-  timeoutMs: number = DEFAULT_TIMEOUT_MS
-): Promise<SearchTermsResult> {
-  if (!prompt.trim()) {
-    return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Empty prompt' };
-  }
-
+/** One Gemini attempt with its own timeout; returns the raw response text. */
+async function callTermsModel(ai: GoogleGenAI, prompt: string, timeoutMs: number): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -88,37 +85,65 @@ export async function extractSearchTerms(
         abortSignal: controller.signal,
       },
     });
-
-    const text = response.text?.trim();
-    if (!text) {
-      return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Term extraction returned an empty response' };
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return { terms: [], source: SEARCH_TERMS_MODEL, error: `Term extraction returned invalid JSON: ${text.slice(0, 200)}` };
-    }
-
-    const rawTerms = typeof parsed === 'object' && parsed !== null ? (parsed as { terms?: unknown }).terms : undefined;
-    const terms = filterTermsAgainstPrompt(rawTerms, prompt);
-    if (terms.length === 0) {
-      return {
-        terms: [],
-        source: SEARCH_TERMS_MODEL,
-        error: `No usable terms (model returned ${JSON.stringify(rawTerms ?? null).slice(0, 200)})`,
-      };
-    }
-    return { terms, source: SEARCH_TERMS_MODEL };
+    return response.text?.trim() ?? '';
   } catch (err) {
-    const msg = controller.signal.aborted
-      ? `Term extraction timed out after ${timeoutMs}ms`
-      : err instanceof Error
-      ? err.message
-      : String(err);
-    console.warn('Search term extraction failed:', msg);
-    return { terms: [], source: SEARCH_TERMS_MODEL, error: msg };
+    if (controller.signal.aborted) throw new AttemptTimeoutError(`Term extraction timed out after ${timeoutMs}ms`);
+    throw err;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Extract terms with retries. Throws UpstreamError on upstream outages; unusable model
+ * output (empty, bad JSON, no terms found in the prompt) returns no terms with `error`.
+ */
+export async function extractSearchTermsStrict(
+  ai: GoogleGenAI,
+  prompt: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<SearchTermsResult> {
+  if (!prompt.trim()) {
+    return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Empty prompt', attempts: 0 };
+  }
+  const { value: text, attempts } = await withRetryDetailed(() => callTermsModel(ai, prompt, timeoutMs), 'search.terms');
+  if (!text) {
+    return { terms: [], source: SEARCH_TERMS_MODEL, error: 'Term extraction returned an empty response', attempts };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { terms: [], source: SEARCH_TERMS_MODEL, error: `Term extraction returned invalid JSON: ${text.slice(0, 200)}`, attempts };
+  }
+  const rawTerms = typeof parsed === 'object' && parsed !== null ? (parsed as { terms?: unknown }).terms : undefined;
+  const terms = filterTermsAgainstPrompt(rawTerms, prompt);
+  if (terms.length === 0) {
+    return {
+      terms: [],
+      source: SEARCH_TERMS_MODEL,
+      error: `No usable terms (model returned ${JSON.stringify(rawTerms ?? null).slice(0, 200)})`,
+      attempts,
+    };
+  }
+  return { terms, source: SEARCH_TERMS_MODEL, attempts };
+}
+
+/** Never throws: upstream failures return no terms and an `error` tagged "[CODE] ...". */
+export async function extractSearchTerms(
+  ai: GoogleGenAI,
+  prompt: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<SearchTermsResult> {
+  try {
+    return await extractSearchTermsStrict(ai, prompt, timeoutMs);
+  } catch (err) {
+    if (err instanceof UpstreamError) {
+      console.warn(`Search term extraction failed: ${err.code} after ${err.attempts} attempt(s)`);
+      return { terms: [], source: SEARCH_TERMS_MODEL, error: `[${err.code}] ${err.message.slice(0, 400)}`, errorCode: err.code, attempts: err.attempts };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('Search term extraction failed:', msg);
+    return { terms: [], source: SEARCH_TERMS_MODEL, error: msg };
   }
 }

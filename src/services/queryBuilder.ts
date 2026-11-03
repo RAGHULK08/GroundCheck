@@ -27,7 +27,8 @@ export interface PromptTerms {
 
 /** Soft cap on query length. The claim itself is always kept whole, even if longer. */
 export const MAX_QUERY_LENGTH = 200;
-const TERMS_TIMEOUT_MS = 10_000;
+/** Server retries up to 4 attempts of 8 s plus backoff. */
+const TERMS_TIMEOUT_MS = 45_000;
 
 /** Successful extractions per prompt (terms depend only on the prompt, not the claim). */
 const termsCache = new Map<string, Promise<PromptTerms>>();

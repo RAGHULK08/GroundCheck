@@ -13,7 +13,7 @@ import { performWebSearchDetailed, WebSearchResult } from './webSearch';
 import { embedTexts, cosineSimilarity, EmbeddingError } from './embeddings';
 import { judgeEntailment, judgeEntailmentBatch } from './nli';
 import { findQuantityConflict, QuantityConflictResult } from './conflictCheck';
-import { classifyClaim, computeOverallVerdict } from './claimClassifier';
+import { classifyClaim, computeOverallVerdict, infrastructureFailure } from './claimClassifier';
 import { buildSearchQuery, SearchQuery } from './queryBuilder';
 
 export interface SimilarityResult {
@@ -323,6 +323,32 @@ export async function verifyResponse(
       promptKbScore,
       web: { bestScore: web.bestScore, bestResult: web.bestResult, matches: web.matches, error: web.error },
     });
+    const analysis: ClaimAnalysis = {
+      claimId: `clm-${cIdx + 1}`,
+      text: claim,
+      status: decision.status,
+      statusReason: decision.reason,
+      bestKbScore,
+      top3Chunks,
+      webResults: web.results,
+      bestWebScore: web.bestScore,
+      isContradicted: decision.isContradicted,
+      contradictionSource: decision.contradictionSource,
+      supportingChunkId: decision.supportingChunk?.chunkId,
+      searchQuery: web.query?.text,
+      searchEntities: web.query?.entities,
+      searchQueryDegraded: web.query?.degraded,
+      searchQueryError: web.query?.error,
+      webMatches: enableWebSearch ? web.matches : undefined,
+      webSearchError: web.error,
+      webEchoesDiscarded: web.echoesDiscarded > 0 ? web.echoesDiscarded : undefined,
+    };
+    analysis.infrastructureError = infrastructureFailure(analysis, enableWebSearch);
+    claimsAnalysis.push(analysis);
+
+    // A claim whose status depended on a failed upstream call is an infrastructure warning,
+    // not a verdict: it adds no citation, flagged span or confidence score.
+    if (analysis.infrastructureError) continue;
     scores.push(decision.score);
 
     if (decision.status === 'GROUNDED') {
@@ -342,31 +368,15 @@ export async function verifyResponse(
         webSearched: enableWebSearch,
       });
     }
-
-    claimsAnalysis.push({
-      claimId: `clm-${cIdx + 1}`,
-      text: claim,
-      status: decision.status,
-      statusReason: decision.reason,
-      bestKbScore,
-      top3Chunks,
-      webResults: web.results,
-      bestWebScore: web.bestScore,
-      isContradicted: decision.isContradicted,
-      contradictionSource: decision.contradictionSource,
-      supportingChunkId: decision.supportingChunk?.chunkId,
-      searchQuery: web.query?.text,
-      searchEntities: web.query?.entities,
-      searchQueryDegraded: web.query?.degraded,
-      searchQueryError: web.query?.error,
-      webMatches: enableWebSearch ? web.matches : undefined,
-      webSearchError: web.error,
-      webEchoesDiscarded: web.echoesDiscarded > 0 ? web.echoesDiscarded : undefined,
-    });
   }
 
   const totalClaims = claimsAnalysis.length;
-  const overallVerdict: Verdict = computeOverallVerdict(claimsAnalysis.map((c) => c.status));
+  const verified = claimsAnalysis.filter((c) => !c.infrastructureError);
+  const infrastructureErrors = totalClaims - verified.length;
+  // Verdict over verified claims only. If nothing could be verified, say UNVERIFIABLE
+  // (never GROUNDED by default) and report the infrastructure errors alongside.
+  const overallVerdict: Verdict =
+    totalClaims > 0 && verified.length === 0 ? 'UNVERIFIABLE' : computeOverallVerdict(verified.map((c) => c.status));
 
   const avgConfidence = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0.0;
   const latencyMs = Math.round((performance.now() - start) * 10) / 10;
@@ -388,6 +398,7 @@ export async function verifyResponse(
       citations,
       usedWebSearch: didUseWebSearch,
       promptKbScore: Math.round(promptKbScore * 100) / 100,
+      infrastructureErrors: infrastructureErrors > 0 ? infrastructureErrors : undefined,
     },
     usedDocIds: Array.from(usedDocIds),
   };

@@ -4,9 +4,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import net from 'net';
 import { GoogleGenAI } from '@google/genai';
-import { judgePair, judgePairs } from './server/nliJudge.ts';
-import { extractSearchTerms } from './server/searchTerms.ts';
-import { searchWebGrounded } from './server/webGrounding.ts';
+import { judgePairStrict, judgePairs } from './server/nliJudge.ts';
+import { extractSearchTermsStrict } from './server/searchTerms.ts';
+import { searchWebGroundedStrict } from './server/webGrounding.ts';
+import { UpstreamError, httpStatusFor, upstreamErrorBody, withRetryDetailed } from './server/geminiRetry.ts';
 import { GEMINI_CHAT_MODEL, GEMINI_EMBED_MODEL } from './server/config.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -63,6 +64,22 @@ app.get('/api/models', (_req: Request, res: Response): void => {
 });
 
 /**
+ * Send a typed error for a failed /api call: upstream failures keep their code and
+ * status (429 / 503 / 504 / 502); anything else is reported as INTERNAL_ERROR with
+ * its message, never as a bare generic 500.
+ */
+function sendRouteError(res: Response, label: string, err: unknown): void {
+  if (err instanceof UpstreamError) {
+    console.warn(`${label} failed: ${err.code} (status ${err.status ?? 'n/a'}) after ${err.attempts} attempt(s)`);
+    res.status(httpStatusFor(err.code)).json(upstreamErrorBody(err));
+    return;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`${label} failed:`, message);
+  res.status(500).json({ error: 'INTERNAL_ERROR', message: message.slice(0, 500), attempts: 0 });
+}
+
+/**
  * Server-side Embeddings Endpoint
  */
 app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> => {
@@ -75,10 +92,14 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
 
     const stringTexts = texts.map((t) => (typeof t === 'string' ? t : String(t)));
 
-    const response = await ai.models.embedContent({
-      model: GEMINI_EMBED_MODEL,
-      contents: stringTexts,
-    });
+    const { value: response, attempts } = await withRetryDetailed(
+      () =>
+        ai.models.embedContent({
+          model: GEMINI_EMBED_MODEL,
+          contents: stringTexts,
+        }),
+      'embeddings'
+    );
 
     const embeddingsList: { values?: number[] }[] = [];
     if (Array.isArray(response.embeddings)) {
@@ -91,7 +112,9 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
 
     if (embeddingsList.length !== stringTexts.length) {
       res.status(502).json({
-        error: `Embedding count mismatch: expected ${stringTexts.length}, got ${embeddingsList.length}`,
+        error: 'INVALID_RESPONSE',
+        message: `Embedding count mismatch: expected ${stringTexts.length}, got ${embeddingsList.length}`,
+        attempts,
       });
       return;
     }
@@ -100,7 +123,7 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
     for (let i = 0; i < embeddingsList.length; i++) {
       const rawValues = embeddingsList[i].values;
       if (!rawValues || rawValues.length === 0) {
-        res.status(502).json({ error: `Missing embedding vector for text index ${i}` });
+        res.status(502).json({ error: 'INVALID_RESPONSE', message: `Missing embedding vector for text index ${i}`, attempts });
         return;
       }
 
@@ -117,11 +140,9 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
       vectors.push(normalized);
     }
 
-    res.json({ embeddings: vectors, model: GEMINI_EMBED_MODEL });
+    res.json({ embeddings: vectors, model: GEMINI_EMBED_MODEL, attempts });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error('Server-side embedding error:', msg);
-    res.status(500).json({ error: msg });
+    sendRouteError(res, 'embeddings', error);
   }
 });
 
@@ -134,8 +155,12 @@ app.post('/api/nli/judge', async (req: Request, res: Response): Promise<void> =>
     res.status(400).json({ error: 'premise and hypothesis must both be strings' });
     return;
   }
-  // judgePair never throws; failures come back as neutral = 1 with `error` set.
-  res.json(await judgePair(ai, premise, hypothesis));
+  try {
+    const { result, attempts } = await judgePairStrict(ai, premise, hypothesis);
+    res.json({ ...result, attempts });
+  } catch (err) {
+    sendRouteError(res, 'nli.judge', err);
+  }
 });
 
 /**
@@ -151,11 +176,16 @@ app.post('/api/nli/judge-batch', async (req: Request, res: Response): Promise<vo
     res.status(400).json({ error: 'pairs must be an array of {premise, hypothesis}' });
     return;
   }
-  const results = await judgePairs(ai, pairs, {
-    concurrency: typeof concurrency === 'number' ? concurrency : undefined,
-    timeoutMs: typeof timeoutMs === 'number' ? timeoutMs : undefined,
-  });
-  res.json({ results });
+  try {
+    // Per-pair failures come back inside `results` with errorCode/attempts; the batch itself succeeds.
+    const results = await judgePairs(ai, pairs, {
+      concurrency: typeof concurrency === 'number' ? concurrency : undefined,
+      timeoutMs: typeof timeoutMs === 'number' ? timeoutMs : undefined,
+    });
+    res.json({ results });
+  } catch (err) {
+    sendRouteError(res, 'nli.judge-batch', err);
+  }
 });
 
 /**
@@ -167,8 +197,12 @@ app.post('/api/search/terms', async (req: Request, res: Response): Promise<void>
     res.status(400).json({ error: 'prompt must be a string' });
     return;
   }
-  // extractSearchTerms never throws; failures come back with `error` set and no terms.
-  res.json(await extractSearchTerms(ai, prompt));
+  try {
+    // Unusable model output returns 200 with `error`; upstream outages get their typed status.
+    res.json(await extractSearchTermsStrict(ai, prompt));
+  } catch (err) {
+    sendRouteError(res, 'search.terms', err);
+  }
 });
 
 /**
@@ -180,8 +214,12 @@ app.post('/api/search/web', async (req: Request, res: Response): Promise<void> =
     res.status(400).json({ error: 'query must be a string' });
     return;
   }
-  // searchWebGrounded never throws; failures come back with `error` set and no results.
-  res.json(await searchWebGrounded(ai, query));
+  try {
+    // A response without grounding metadata returns 200 with `error`; outages get their typed status.
+    res.json(await searchWebGroundedStrict(ai, query));
+  } catch (err) {
+    sendRouteError(res, 'search.web', err);
+  }
 });
 
 /**

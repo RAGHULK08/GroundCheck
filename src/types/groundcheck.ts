@@ -41,6 +41,10 @@ export interface NLIProbabilities {
   contradiction: number;
   error?: string;
   source?: string;
+  /** Typed upstream failure code (e.g. QUOTA_EXCEEDED, UPSTREAM_UNAVAILABLE, TIMEOUT) when error is set. */
+  errorCode?: string;
+  /** Gemini attempts used for this judgment (1 = no retry). */
+  attempts?: number;
 }
 
 export interface ChunkMatch {
@@ -80,6 +84,12 @@ export interface ClaimAnalysis {
   webSearchError?: string;
   /** Number of web snippets discarded because they restate the claim/query. */
   webEchoesDiscarded?: number;
+  /**
+   * Set when the claim's status depended on a failed upstream call (quota, overload,
+   * timeout, NLI/search error). Such a claim is NOT verified: it is excluded from the
+   * overall verdict, flagged spans and confidence, and shown as an infrastructure warning.
+   */
+  infrastructureError?: string;
 }
 
 export type ContradictionSource = 'quantity' | 'nli';
@@ -108,6 +118,8 @@ export interface CheckRecord {
   citations?: Citation[];
   claimsAnalysis?: ClaimAnalysis[];
   usedWebSearch?: boolean;
+  /** Claims that could not be verified because of infrastructure failures. */
+  infrastructureErrors?: number;
 }
 
 export interface DailyModelStat {
@@ -134,4 +146,6 @@ export interface VerificationResult {
   citations: Citation[];
   usedWebSearch: boolean;
   promptKbScore?: number;
+  /** Claims that could not be verified because of infrastructure failures (not part of the verdict). */
+  infrastructureErrors?: number;
 }

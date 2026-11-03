@@ -82,7 +82,8 @@ loadPersistedCache();
 
 let embedModelPromise: Promise<string> | null = null;
 const MODELS_TIMEOUT_MS = 5_000;
-const EMBED_TIMEOUT_MS = 30_000;
+/** Server retries up to 4 attempts plus backoff. */
+const EMBED_TIMEOUT_MS = 60_000;
 
 /**
  * Embedding model configured on the server (GET /api/models; no Gemini call).

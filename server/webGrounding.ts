@@ -1,5 +1,6 @@
 import { GoogleGenAI, GroundingMetadata } from '@google/genai';
 import { NLI_MODEL } from './nliJudge.ts';
+import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
 
 /**
  * Server-side web retrieval through Gemini's Google Search grounding tool.
@@ -24,6 +25,10 @@ export interface WebGroundingResult {
   /** Queries Google Search actually ran, as reported by the grounding metadata. */
   searchQueries: string[];
   error?: string;
+  /** Typed upstream code when the failure was an upstream outage (non-throwing wrapper only). */
+  errorCode?: string;
+  /** Gemini attempts used. */
+  attempts?: number;
 }
 
 const SYSTEM_INSTRUCTION = `You are a research assistant with Google Search.
@@ -92,15 +97,8 @@ export function mapGroundingMetadata(meta: GroundingMetadata | undefined): Groun
   return sources.slice(0, MAX_SOURCES);
 }
 
-/** Never throws: failures return no results and an `error` message. */
-export async function searchWebGrounded(
-  ai: GoogleGenAI,
-  query: string,
-  timeoutMs: number = DEFAULT_TIMEOUT_MS
-): Promise<WebGroundingResult> {
-  const q = query.replace(/\s+/g, ' ').trim();
-  if (!q) return { results: [], searchQueries: [], error: 'Empty query' };
-
+/** One grounded Gemini attempt with its own timeout. */
+async function callGroundedModel(ai: GoogleGenAI, q: string, timeoutMs: number): Promise<GroundingMetadata | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -114,22 +112,49 @@ export async function searchWebGrounded(
         abortSignal: controller.signal,
       },
     });
-
-    const meta = response.candidates?.[0]?.groundingMetadata;
-    const searchQueries = meta?.webSearchQueries ?? [];
-    if (!meta) {
-      return { results: [], searchQueries, error: 'Model response contained no grounding metadata' };
-    }
-    return { results: mapGroundingMetadata(meta), searchQueries };
+    return response.candidates?.[0]?.groundingMetadata;
   } catch (err) {
-    const msg = controller.signal.aborted
-      ? `Web search timed out after ${timeoutMs}ms`
-      : err instanceof Error
-      ? err.message
-      : String(err);
-    console.warn('Grounded web search failed:', msg);
-    return { results: [], searchQueries: [], error: msg };
+    if (controller.signal.aborted) throw new AttemptTimeoutError(`Web search timed out after ${timeoutMs}ms`);
+    throw err;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Grounded search with retries. Throws UpstreamError on upstream outages / quota;
+ * a response without grounding metadata returns no results with `error`.
+ */
+export async function searchWebGroundedStrict(
+  ai: GoogleGenAI,
+  query: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<WebGroundingResult> {
+  const q = query.replace(/\s+/g, ' ').trim();
+  if (!q) return { results: [], searchQueries: [], error: 'Empty query', attempts: 0 };
+  const { value: meta, attempts } = await withRetryDetailed(() => callGroundedModel(ai, q, timeoutMs), 'search.web');
+  const searchQueries = meta?.webSearchQueries ?? [];
+  if (!meta) {
+    return { results: [], searchQueries, error: 'Model response contained no grounding metadata', attempts };
+  }
+  return { results: mapGroundingMetadata(meta), searchQueries, attempts };
+}
+
+/** Never throws: upstream failures return no results and an `error` tagged "[CODE] ...". */
+export async function searchWebGrounded(
+  ai: GoogleGenAI,
+  query: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<WebGroundingResult> {
+  try {
+    return await searchWebGroundedStrict(ai, query, timeoutMs);
+  } catch (err) {
+    if (err instanceof UpstreamError) {
+      console.warn(`Grounded web search failed: ${err.code} after ${err.attempts} attempt(s)`);
+      return { results: [], searchQueries: [], error: `[${err.code}] ${err.message.slice(0, 400)}`, errorCode: err.code, attempts: err.attempts };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('Grounded web search failed:', msg);
+    return { results: [], searchQueries: [], error: msg };
   }
 }

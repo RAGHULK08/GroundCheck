@@ -49,6 +49,17 @@ interface ClaimStatusBadgeProps {
 }
 
 const ClaimStatusBadge: React.FC<ClaimStatusBadgeProps> = ({ claim }) => {
+  if (claim.infrastructureError) {
+    return (
+      <span
+        title={claim.infrastructureError}
+        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-950/80 border border-amber-500/50 text-amber-300"
+      >
+        <AlertTriangle className="w-3 h-3 text-amber-400" />
+        NOT VERIFIED (infrastructure)
+      </span>
+    );
+  }
   if (claim.status === 'GROUNDED') {
     return (
       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-950/80 border border-emerald-500/40 text-emerald-300">
@@ -283,10 +294,17 @@ export const ClaimLogCard: React.FC<ClaimLogCardProps> = ({ claim, index, webSea
         </div>
       </div>
 
-      <div className="text-xs text-slate-300 flex items-start gap-1.5">
-        <ArrowRight className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
-        <span className="break-words">{claim.statusReason}</span>
-      </div>
+      {claim.infrastructureError ? (
+        <div className="p-2 rounded bg-amber-950/40 border border-amber-500/30 text-xs text-amber-300 break-words">
+          Not verified: an upstream call this claim depended on failed, so no verdict is given.{' '}
+          <span className="font-mono text-amber-200/80">{claim.infrastructureError}</span>
+        </div>
+      ) : (
+        <div className="text-xs text-slate-300 flex items-start gap-1.5">
+          <ArrowRight className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
+          <span className="break-words">{claim.statusReason}</span>
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">

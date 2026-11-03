@@ -1,5 +1,6 @@
 import type { ClaimAnalysis, ClaimStatus, KnowledgeBaseDoc } from '../types/groundcheck';
 import { verifyResponse } from './verifier';
+import { infrastructureFailure } from './claimClassifier';
 import { DEFAULT_THRESHOLD, INITIAL_DOCS } from './storage';
 import {
   TEST_CASE_CATEGORIES,
@@ -102,23 +103,6 @@ export function collectWarnings(claim: ClaimAnalysis, claimCount: number): strin
   return warnings;
 }
 
-/**
- * Pure: the infrastructure failure that the claim's verdict depended on, if any.
- * A verdict decided by KB evidence (contradiction or a supporting chunk) uses only
- * successful judgments, so it stands; otherwise any failed NLI or web call means the
- * status may be an artefact of the outage and must not be scored.
- */
-export function infrastructureFailure(claim: ClaimAnalysis, webEnabled: boolean): string | undefined {
-  const decidedByKb = claim.isContradicted || claim.supportingChunkId !== undefined;
-  if (decidedByKb) return undefined;
-  const kbNli = claim.top3Chunks.find((c) => c.nli.error)?.nli.error;
-  if (kbNli) return kbNli;
-  if (!webEnabled) return undefined;
-  if (claim.webSearchError) return claim.webSearchError;
-  const webNli = (claim.webMatches ?? []).find((m) => m.nli?.error)?.nli?.error;
-  return webNli;
-}
-
 async function runOne(
   testCase: VerifierTestCase,
   kb: KnowledgeBaseDoc[],
@@ -147,7 +131,7 @@ async function runOne(
         durationMs: elapsed(),
       };
     }
-    const infra = infrastructureFailure(claim, testCase.enableWebSearch === true);
+    const infra = claim.infrastructureError ?? infrastructureFailure(claim, testCase.enableWebSearch === true);
     if (infra) {
       return {
         testCase,

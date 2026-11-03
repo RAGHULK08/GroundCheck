@@ -2,6 +2,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import type { NLIProbabilities } from '../src/types/groundcheck';
 import { makeNeutralFallback, validateAndNormalizeScores } from '../src/services/nliScores.ts';
 import { GEMINI_CHAT_MODEL } from './config.ts';
+import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
 
 /**
  * Server-side NLI judge: the only place that calls Gemini for entailment.
@@ -51,26 +52,28 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
   return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
-/**
- * Judge one premise/hypothesis pair. Never throws: any failure (network, timeout,
- * invalid JSON, out-of-range numbers) yields neutral = 1 with `error` set.
- */
-export async function judgePair(
-  ai: GoogleGenAI,
-  premise: string,
-  hypothesis: string,
-  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS
-): Promise<NLIProbabilities> {
-  if (!premise.trim() || !hypothesis.trim()) {
-    return makeNeutralFallback('Empty premise or hypothesis');
-  }
+export interface NliJudgment {
+  result: NLIProbabilities;
+  /** Gemini attempts used (0 when no call was needed). */
+  attempts: number;
+}
 
+/** One Gemini attempt with its own timeout; returns the raw response text. */
+async function callJudgeModel(ai: GoogleGenAI, premise: string, hypothesis: string, timeoutMs: number): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await ai.models.generateContent({
       model: NLI_MODEL,
-      contents: `PREMISE:\n"""\n${premise}\n"""\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
+      contents: `PREMISE:
+"""
+${premise}
+"""
+
+HYPOTHESIS:
+"""
+${hypothesis}
+"""`,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: 0,
@@ -79,31 +82,65 @@ export async function judgePair(
         abortSignal: controller.signal,
       },
     });
-
-    const text = response.text?.trim();
-    if (!text) {
-      return makeNeutralFallback('NLI model returned an empty response');
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return makeNeutralFallback(`NLI model returned invalid JSON: ${text.slice(0, 200)}`);
-    }
-
-    const validation = validateAndNormalizeScores(parsed, NLI_MODEL);
-    return validation.ok ? validation.value : makeNeutralFallback(validation.error);
+    return response.text?.trim() ?? '';
   } catch (err) {
-    const msg = controller.signal.aborted
-      ? `NLI call timed out after ${timeoutMs}ms`
-      : err instanceof Error
-      ? err.message
-      : String(err);
-    console.warn('NLI judgment failed:', msg);
-    return makeNeutralFallback(msg);
+    if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
+    throw err;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Judge one pair with retries. Throws UpstreamError when Gemini is unavailable, over
+ * quota, times out or rejects the request. Invalid model output (empty, bad JSON,
+ * out-of-range numbers) is not an upstream outage: it returns neutral = 1 with `error`.
+ */
+export async function judgePairStrict(
+  ai: GoogleGenAI,
+  premise: string,
+  hypothesis: string,
+  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS
+): Promise<NliJudgment> {
+  if (!premise.trim() || !hypothesis.trim()) {
+    return { result: makeNeutralFallback('Empty premise or hypothesis'), attempts: 0 };
+  }
+  const { value: text, attempts } = await withRetryDetailed(
+    () => callJudgeModel(ai, premise, hypothesis, timeoutMs),
+    'nli.judge'
+  );
+  if (!text) return { result: { ...makeNeutralFallback('NLI model returned an empty response'), attempts }, attempts };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { result: { ...makeNeutralFallback(`NLI model returned invalid JSON: ${text.slice(0, 200)}`), attempts }, attempts };
+  }
+  const validation = validateAndNormalizeScores(parsed, NLI_MODEL);
+  const result = validation.ok ? validation.value : makeNeutralFallback(validation.error);
+  return { result: { ...result, attempts }, attempts };
+}
+
+/**
+ * Judge one premise/hypothesis pair. Never throws: upstream failures (after retries)
+ * yield neutral = 1 with `error` tagged "[CODE] ..." and `errorCode` set.
+ */
+export async function judgePair(
+  ai: GoogleGenAI,
+  premise: string,
+  hypothesis: string,
+  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS
+): Promise<NLIProbabilities> {
+  try {
+    return (await judgePairStrict(ai, premise, hypothesis, timeoutMs)).result;
+  } catch (err) {
+    if (err instanceof UpstreamError) {
+      console.warn(`NLI judgment failed: ${err.code} after ${err.attempts} attempt(s)`);
+      return { ...makeNeutralFallback(`[${err.code}] ${err.message.slice(0, 400)}`), errorCode: err.code, attempts: err.attempts };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('NLI judgment failed:', msg);
+    return makeNeutralFallback(msg);
   }
 }
 

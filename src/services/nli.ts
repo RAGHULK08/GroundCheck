@@ -1,5 +1,5 @@
 import { NLIProbabilities } from '../types/groundcheck';
-import { fetchJson, formatApiError, tagUpstreamError } from './apiClient';
+import { ApiError, errorCodeOf, fetchJson, formatApiError, tagUpstreamError } from './apiClient';
 import { makeNeutralFallback, validateAndNormalizeScores } from './nliScores';
 
 /**
@@ -26,6 +26,23 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_CONCURRENCY = 4;
 /** Extra client-side allowance on top of the server's own per-call timeouts. */
 const NETWORK_SLACK_MS = 3_000;
+/** The server retries each Gemini call up to 4 attempts with ~7 s of backoff in total. */
+const SERVER_MAX_ATTEMPTS = 4;
+const SERVER_BACKOFF_BUDGET_MS = 8_000;
+
+/** Longest a server-side judgment can take with retries, plus slack. */
+function retryAwareTimeout(perAttemptMs: number): number {
+  return perAttemptMs * SERVER_MAX_ATTEMPTS + SERVER_BACKOFF_BUDGET_MS + NETWORK_SLACK_MS;
+}
+
+function failedJudgment(err: unknown): NLIProbabilities {
+  const message = formatApiError(err);
+  return {
+    ...makeNeutralFallback(message),
+    errorCode: err instanceof ApiError ? err.code : errorCodeOf(message),
+    attempts: err instanceof ApiError ? err.attempts : undefined,
+  };
+}
 const UNKNOWN_SOURCE = 'unknown';
 
 const inMemoryNliCache = new Map<string, NLIProbabilities>();
@@ -119,13 +136,26 @@ function parseServerJudgment(raw: unknown): NLIProbabilities {
   if (typeof raw !== 'object' || raw === null) {
     return makeNeutralFallback('Malformed NLI response from server');
   }
-  const { error, source } = raw as { error?: unknown; source?: unknown };
+  const { error, source, errorCode, attempts } = raw as {
+    error?: unknown;
+    source?: unknown;
+    errorCode?: unknown;
+    attempts?: unknown;
+  };
   const src = typeof source === 'string' ? source : UNKNOWN_SOURCE;
+  const att = typeof attempts === 'number' ? attempts : undefined;
   if (typeof error === 'string' && error) {
-    return makeNeutralFallback(tagUpstreamError(error), src);
+    const tagged = tagUpstreamError(error);
+    return {
+      ...makeNeutralFallback(tagged, src),
+      errorCode: typeof errorCode === 'string' ? errorCode : errorCodeOf(tagged),
+      attempts: att,
+    };
   }
   const validation = validateAndNormalizeScores(raw, src);
-  return validation.ok ? validation.value : makeNeutralFallback(`Server NLI response rejected: ${validation.error}`);
+  return validation.ok
+    ? { ...validation.value, attempts: att }
+    : makeNeutralFallback(`Server NLI response rejected: ${validation.error}`);
 }
 
 async function postJson(url: string, body: unknown, timeoutMs: number): Promise<unknown> {
@@ -151,10 +181,10 @@ export async function judgeEntailment(
 
   let result: NLIProbabilities;
   try {
-    const data = await postJson('/api/nli/judge', { premise: p, hypothesis: h }, timeoutMs + NETWORK_SLACK_MS);
+    const data = await postJson('/api/nli/judge', { premise: p, hypothesis: h }, retryAwareTimeout(timeoutMs));
     result = parseServerJudgment(data);
   } catch (err) {
-    result = makeNeutralFallback(formatApiError(err));
+    result = failedJudgment(err);
   }
 
   if (cacheIfValid(key, result)) persistNliCache();
@@ -162,9 +192,10 @@ export async function judgeEntailment(
 }
 
 /**
- * Judge many pairs with a concurrency limit and per-call timeout.
- * Uses the server batch endpoint; if that request itself fails, falls back to
- * individual calls through a client-side worker pool (logged, not silent).
+ * Judge many pairs with a concurrency limit and per-call timeout via the server batch
+ * endpoint (which retries each pair). If the batch request itself fails, every pending
+ * pair gets an error-flagged neutral result with the typed code. There is no per-pair
+ * fallback: during an outage it would only multiply failing calls. Never cached.
  * Result order matches input order.
  */
 export async function judgeEntailmentBatch(
@@ -194,8 +225,8 @@ export async function judgeEntailmentBatch(
   if (pending.length === 0) return results;
 
   const safeConcurrency = Math.max(1, Math.floor(concurrency));
-  // Server runs ceil(n / concurrency) sequential rounds, each bounded by timeoutMs.
-  const batchTimeoutMs = Math.ceil(pending.length / safeConcurrency) * timeoutMs + NETWORK_SLACK_MS;
+  // Server runs ceil(n / concurrency) sequential rounds, each bounded by its retry budget.
+  const batchTimeoutMs = Math.ceil(pending.length / safeConcurrency) * retryAwareTimeout(timeoutMs);
 
   try {
     const data = await postJson(
@@ -221,23 +252,9 @@ export async function judgeEntailmentBatch(
     if (cacheUpdated) persistNliCache();
     return results;
   } catch (err) {
-    console.warn(
-      'NLI batch endpoint failed; falling back to individual calls.',
-      err instanceof Error ? err.message : err
-    );
+    const failed = failedJudgment(err);
+    console.warn(`NLI batch request failed for ${pending.length} pair(s): ${failed.error ?? ''}`);
+    for (const item of pending) results[item.index] = failed;
+    return results;
   }
-
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < pending.length) {
-      const item = pending[next++];
-      results[item.index] = await judgeEntailment(item.pair.premise, item.pair.hypothesis, timeoutMs);
-    }
-  };
-  const pool: Promise<void>[] = [];
-  for (let w = 0; w < Math.min(safeConcurrency, pending.length); w++) {
-    pool.push(worker());
-  }
-  await Promise.all(pool);
-  return results;
 }

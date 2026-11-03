@@ -29,7 +29,8 @@ export interface WebSearchOutcome {
   cached?: boolean;
 }
 
-const CLIENT_TIMEOUT_MS = 10_000; // server aborts its own call at 8s
+/** Server retries up to 4 attempts of 8 s plus backoff. */
+const CLIENT_TIMEOUT_MS = 45_000;
 const cache = new Map<string, Promise<WebSearchOutcome>>();
 
 function isWebSearchResult(v: unknown): v is WebSearchResult {

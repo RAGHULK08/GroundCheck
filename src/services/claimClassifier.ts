@@ -1,4 +1,4 @@
-import type { ChunkMatch, ClaimStatus, ContradictionSource, Verdict, WebEvidenceMatch } from '../types/groundcheck';
+import type { ChunkMatch, ClaimAnalysis, ClaimStatus, ContradictionSource, Verdict, WebEvidenceMatch } from '../types/groundcheck';
 import type { QuantityConflictResult } from './conflictCheck';
 import type { WebSearchResult } from './webSearch';
 
@@ -275,4 +275,23 @@ export function computeOverallVerdict(statuses: ClaimStatus[]): Verdict {
   if (hallucinated > 0) return hallucinated === total ? 'HALLUCINATED' : 'PARTIAL';
   if (unverifiable > 0) return unverifiable === total ? 'UNVERIFIABLE' : 'PARTIAL';
   return 'GROUNDED';
+}
+
+/**
+ * Pure: the infrastructure failure the claim's status depended on, if any.
+ * A status decided by KB evidence (contradiction or a supporting chunk) uses only
+ * successful judgments, so it stands. Otherwise any failed KB NLI call, or (with web
+ * search on) a failed search or web NLI call, means the status may be an artefact of
+ * the outage, so the claim must not be counted as verified.
+ */
+export function infrastructureFailure(
+  claim: Pick<ClaimAnalysis, 'isContradicted' | 'supportingChunkId' | 'top3Chunks' | 'webSearchError' | 'webMatches'>,
+  webEnabled: boolean
+): string | undefined {
+  if (claim.isContradicted || claim.supportingChunkId !== undefined) return undefined;
+  const kbNli = claim.top3Chunks.find((ch) => ch.nli.error)?.nli.error;
+  if (kbNli) return kbNli;
+  if (!webEnabled) return undefined;
+  if (claim.webSearchError) return claim.webSearchError;
+  return (claim.webMatches ?? []).find((m) => m.nli?.error)?.nli?.error;
 }
