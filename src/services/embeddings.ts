@@ -11,15 +11,14 @@ export class EmbeddingError extends Error {
   }
 }
 
-/**
- * Embedding model used by the server-side /api/embeddings route (informational)
- */
-export const EMBEDDING_MODEL = 'gemini-embedding-2-preview';
+/** v2 cache: entries are keyed by embedding model ID + text hash (vectors from different models are not comparable). */
+const VECTOR_CACHE_KEY = 'groundcheck_embeddings_v2';
+/** Pre-v2 cache had no model tag and may hold gemini-embedding-2-preview vectors; it is deleted on load. */
+const LEGACY_VECTOR_CACHE_KEYS = ['groundcheck_vector_cache_v1'];
+const MAX_PERSISTED_VECTORS = 500;
 
-const VECTOR_CACHE_KEY = 'groundcheck_vector_cache_v1';
-
 /**
- * In-memory vector cache
+ * In-memory vector cache, keyed by cacheKey(model, text)
  */
 const inMemoryCache = new Map<string, number[]>();
 
@@ -35,24 +34,28 @@ export function hashText(text: string): string {
   return (hash >>> 0).toString(16);
 }
 
+function cacheKey(model: string, text: string): string {
+  return `${model}::${hashText(text)}`;
+}
+
 /**
- * Initialize cache from localStorage
+ * Initialize cache from localStorage and drop untagged legacy caches.
  */
 function loadPersistedCache(): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      const stored = localStorage.getItem(VECTOR_CACHE_KEY);
-      if (stored) {
-        const parsed: Record<string, number[]> = JSON.parse(stored);
-        for (const [key, vector] of Object.entries(parsed)) {
-          if (Array.isArray(vector)) {
-            inMemoryCache.set(key, vector);
-          }
-        }
+    if (typeof localStorage === 'undefined') return;
+    for (const legacy of LEGACY_VECTOR_CACHE_KEYS) localStorage.removeItem(legacy);
+    const stored = localStorage.getItem(VECTOR_CACHE_KEY);
+    if (!stored) return;
+    const parsed: unknown = JSON.parse(stored);
+    if (typeof parsed !== 'object' || parsed === null) return;
+    for (const [key, vector] of Object.entries(parsed as Record<string, unknown>)) {
+      if (key.includes('::') && Array.isArray(vector) && vector.every((x) => typeof x === 'number')) {
+        inMemoryCache.set(key, vector as number[]);
       }
     }
-  } catch {
-    // Gracefully handle storage errors without breaking runtime
+  } catch (err) {
+    console.warn('Embedding cache could not be loaded from localStorage; starting empty.', err);
   }
 }
 
@@ -61,22 +64,42 @@ function loadPersistedCache(): void {
  */
 function persistCache(): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      const obj: Record<string, number[]> = {};
-      // Save last 500 entries to prevent exceeding quota
-      const entries = Array.from(inMemoryCache.entries()).slice(-500);
-      for (const [key, vector] of entries) {
-        obj[key] = vector;
-      }
-      localStorage.setItem(VECTOR_CACHE_KEY, JSON.stringify(obj));
+    if (typeof localStorage === 'undefined') return;
+    const obj: Record<string, number[]> = {};
+    for (const [key, vector] of Array.from(inMemoryCache.entries()).slice(-MAX_PERSISTED_VECTORS)) {
+      obj[key] = vector;
     }
-  } catch {
-    // Gracefully handle storage quota errors
+    localStorage.setItem(VECTOR_CACHE_KEY, JSON.stringify(obj));
+  } catch (err) {
+    console.warn('Embedding cache could not be persisted to localStorage.', err);
   }
 }
 
 // Load cache on module initialization
 loadPersistedCache();
+
+let embedModelPromise: Promise<string> | null = null;
+
+/**
+ * Embedding model configured on the server (GET /api/models; no Gemini call).
+ * Fetched once per page load; a failure is not cached, so the next call retries.
+ */
+export function getEmbedModel(): Promise<string> {
+  if (!embedModelPromise) {
+    embedModelPromise = fetch('/api/models')
+      .then(async (res) => {
+        if (!res.ok) throw new EmbeddingError(`Model config endpoint error (${res.status})`);
+        const data = (await res.json()) as { embed?: unknown };
+        if (typeof data.embed !== 'string' || !data.embed) throw new EmbeddingError('Model config missing embed model');
+        return data.embed;
+      })
+      .catch((err: unknown) => {
+        embedModelPromise = null;
+        throw err instanceof EmbeddingError ? err : new EmbeddingError(`Could not read model config: ${String(err)}`, err);
+      });
+  }
+  return embedModelPromise;
+}
 
 /**
  * Normalize a vector to unit length (L2 norm)
@@ -114,7 +137,7 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 /**
  * Call server-side /api/embeddings route
  */
-async function callServerEmbeddings(texts: string[]): Promise<number[][]> {
+async function callServerEmbeddings(texts: string[], expectedModel: string): Promise<number[][]> {
   const res = await fetch('/api/embeddings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -126,9 +149,14 @@ async function callServerEmbeddings(texts: string[]): Promise<number[][]> {
     throw new EmbeddingError(`Server embedding endpoint error (${res.status}): ${errorText}`);
   }
 
-  const data = (await res.json()) as { embeddings?: number[][]; error?: string };
+  const data = (await res.json()) as { embeddings?: number[][]; error?: string; model?: string };
   if (data.error) {
     throw new EmbeddingError(data.error);
+  }
+  if (data.model !== expectedModel) {
+    // Server config changed since the model was read: refuse to mix vectors from different models.
+    embedModelPromise = null;
+    throw new EmbeddingError(`Embedding model changed (expected ${expectedModel}, server used ${String(data.model)}); retry`);
   }
   if (!Array.isArray(data.embeddings) || data.embeddings.length !== texts.length) {
     throw new EmbeddingError('Invalid embeddings returned from server');
@@ -146,6 +174,7 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
     return [];
   }
 
+  const model = await getEmbedModel();
   const results: (number[] | null)[] = new Array(texts.length).fill(null);
   const uncachedIndices: number[] = [];
   const uncachedTexts: string[] = [];
@@ -153,7 +182,7 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
   // Check cache first
   for (let i = 0; i < texts.length; i++) {
     const text = texts[i];
-    const key = hashText(text);
+    const key = cacheKey(model, text);
     if (inMemoryCache.has(key)) {
       results[i] = inMemoryCache.get(key)!;
     } else {
@@ -169,7 +198,7 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
 
   // All Gemini calls happen server-side; the API key never reaches the browser.
   try {
-    const embeddedVectors = await callServerEmbeddings(uncachedTexts);
+    const embeddedVectors = await callServerEmbeddings(uncachedTexts, model);
 
     let cacheUpdated = false;
 
@@ -183,7 +212,7 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
 
       results[originalIndex] = vector;
 
-      const key = hashText(uncachedTexts[j]);
+      const key = cacheKey(model, uncachedTexts[j]);
       inMemoryCache.set(key, vector);
       cacheUpdated = true;
     }

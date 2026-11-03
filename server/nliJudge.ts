@@ -1,13 +1,15 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import type { NLIProbabilities } from '../src/types/groundcheck';
 import { makeNeutralFallback, validateAndNormalizeScores } from '../src/services/nliScores.ts';
+import { GEMINI_CHAT_MODEL } from './config.ts';
 
 /**
  * Server-side NLI judge: the only place that calls Gemini for entailment.
  * The API key never leaves the server; the browser reaches this via /api/nli/*.
  */
 
-export const NLI_MODEL = 'gemini-3.8-flash';
+/** Kept for compatibility; the model name lives in server/config.ts. */
+export const NLI_MODEL = GEMINI_CHAT_MODEL;
 export const DEFAULT_NLI_CONCURRENCY = 4;
 export const DEFAULT_NLI_TIMEOUT_MS = 10_000;
 const MAX_NLI_CONCURRENCY = 8;

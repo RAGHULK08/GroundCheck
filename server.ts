@@ -6,6 +6,7 @@ import { GoogleGenAI } from '@google/genai';
 import { judgePair, judgePairs } from './server/nliJudge.ts';
 import { extractSearchTerms } from './server/searchTerms.ts';
 import { searchWebGrounded } from './server/webGrounding.ts';
+import { GEMINI_CHAT_MODEL, GEMINI_EMBED_MODEL } from './server/config.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,13 +44,19 @@ const ai = new GoogleGenAI({
   },
 });
 
-const EMBEDDING_MODEL = 'gemini-embedding-2-preview';
 
 /**
  * Health check endpoint
  */
 app.get('/api/health', (_req: Request, res: Response): void => {
   res.json({ status: 'ok', serverTime: new Date().toISOString() });
+});
+
+/**
+ * Configured model names (no Gemini call). The client keys its embedding cache by the embed model.
+ */
+app.get('/api/models', (_req: Request, res: Response): void => {
+  res.json({ chat: GEMINI_CHAT_MODEL, embed: GEMINI_EMBED_MODEL });
 });
 
 /**
@@ -66,7 +73,7 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
     const stringTexts = texts.map((t) => (typeof t === 'string' ? t : String(t)));
 
     const response = await ai.models.embedContent({
-      model: EMBEDDING_MODEL,
+      model: GEMINI_EMBED_MODEL,
       contents: stringTexts,
     });
 
@@ -107,7 +114,7 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
       vectors.push(normalized);
     }
 
-    res.json({ embeddings: vectors });
+    res.json({ embeddings: vectors, model: GEMINI_EMBED_MODEL });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error('Server-side embedding error:', msg);
