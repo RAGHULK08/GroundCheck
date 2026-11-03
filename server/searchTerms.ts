@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import { GEMINI_CHAT_MODELS } from './config.ts';
 import { NLI_MODEL } from './nliJudge.ts';
-import { AttemptTimeoutError, UpstreamError, withRetryDetailed } from './geminiRetry.ts';
+import { AttemptTimeoutError, UpstreamError, statusOf, withRetryDetailed } from './geminiRetry.ts';
 import { cacheGet, cacheKey, cacheSet } from './geminiCache.ts';
 
 /**
@@ -70,26 +71,71 @@ export function filterTermsAgainstPrompt(raw: unknown, prompt: string): string[]
   return out;
 }
 
+const STOPWORDS = new Set([
+  'what', 'when', 'where', 'which', 'who', 'why', 'how', 'is', 'are', 'was', 'were',
+  'the', 'a', 'an', 'and', 'or', 'for', 'of', 'in', 'on', 'at', 'to', 'from', 'with',
+  'about', 'can', 'you', 'our', 'my', 'your', 'their', 'policy', 'please', 'tell', 'me'
+]);
+
+/** Deterministic local keyword extractor from prompt when model calls are degraded */
+export function extractLocalFallbackTerms(prompt: string): string[] {
+  const terms: string[] = [];
+  const seen = new Set<string>();
+  const add = (t: string): void => {
+    const clean = normalizeSpaces(t);
+    const key = clean.toLowerCase();
+    if (clean.length >= 2 && !seen.has(key) && !STOPWORDS.has(key) && terms.length < MAX_SEARCH_TERMS) {
+      seen.add(key);
+      terms.push(clean);
+    }
+  };
+  // 1. Quoted terms
+  for (const m of prompt.matchAll(/["']([^"']{2,40})["']/g)) add(m[1]);
+  // 2. Acronyms (e.g. GDPR, IRCTC, TDR, API)
+  for (const m of prompt.matchAll(/\b([A-Z]{2,10})\b/g)) add(m[1]);
+  // 3. Capitalized phrases (e.g. Article 17, Tokyo)
+  for (const m of prompt.matchAll(/\b([A-Z][a-z0-9]+(?:\s+[A-Z0-9][a-z0-9]+)*)\b/g)) add(m[1]);
+  // 4. Significant domain words
+  if (terms.length < 2) {
+    for (const word of prompt.split(/\s+/)) {
+      const clean = word.replace(/[^a-zA-Z0-9-]/g, '');
+      if (clean.length >= 4 && !STOPWORDS.has(clean.toLowerCase())) add(clean);
+    }
+  }
+  return terms.slice(0, MAX_SEARCH_TERMS);
+}
+
 /** One Gemini attempt with its own timeout; returns the raw response text. */
 async function callTermsModel(ai: GoogleGenAI, prompt: string, timeoutMs: number): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let lastError: unknown;
   try {
-    const response = await ai.models.generateContent({
-      model: SEARCH_TERMS_MODEL,
-      contents: `USER PROMPT:\n"""\n${prompt}\n"""`,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0,
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        abortSignal: controller.signal,
-      },
-    });
-    return response.text?.trim() ?? '';
-  } catch (err) {
-    if (controller.signal.aborted) throw new AttemptTimeoutError(`Term extraction timed out after ${timeoutMs}ms`);
-    throw err;
+    for (const model of GEMINI_CHAT_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: `USER PROMPT:\n"""\n${prompt}\n"""`,
+          config: {
+            systemInstruction: SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+            abortSignal: controller.signal,
+          },
+        });
+        return response.text?.trim() ?? '';
+      } catch (err) {
+        lastError = err;
+        if (controller.signal.aborted) throw new AttemptTimeoutError(`Term extraction timed out after ${timeoutMs}ms`);
+        const status = statusOf(err);
+        if (status === 503 || status === 429 || status === 500 || status === 504) {
+          console.warn(`[terms] Model ${model} returned ${status}; trying next fallback model...`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
   } finally {
     clearTimeout(timer);
   }
@@ -123,6 +169,11 @@ export async function extractSearchTermsStrict(
   const rawTerms = typeof parsed === 'object' && parsed !== null ? (parsed as { terms?: unknown }).terms : undefined;
   const terms = filterTermsAgainstPrompt(rawTerms, prompt);
   if (terms.length === 0) {
+    const fallback = extractLocalFallbackTerms(prompt);
+    if (fallback.length > 0) {
+      cacheSet(key, fallback);
+      return { terms: fallback, source: 'local-fallback', attempts };
+    }
     return {
       terms: [],
       source: SEARCH_TERMS_MODEL,
@@ -134,7 +185,7 @@ export async function extractSearchTermsStrict(
   return { terms, source: SEARCH_TERMS_MODEL, attempts };
 }
 
-/** Never throws: upstream failures return no terms and an `error` tagged "[CODE] ...". */
+/** Never throws: upstream failures return local terms and an `error` tagged "[CODE] ...". */
 export async function extractSearchTerms(
   ai: GoogleGenAI,
   prompt: string,
@@ -143,12 +194,19 @@ export async function extractSearchTerms(
   try {
     return await extractSearchTermsStrict(ai, prompt, timeoutMs);
   } catch (err) {
+    const fallback = extractLocalFallbackTerms(prompt);
     if (err instanceof UpstreamError) {
       console.warn(`Search term extraction failed: ${err.code} after ${err.attempts} attempt(s)`);
-      return { terms: [], source: SEARCH_TERMS_MODEL, error: `[${err.code}] ${err.message.slice(0, 400)}`, errorCode: err.code, attempts: err.attempts };
+      return {
+        terms: fallback,
+        source: 'local-fallback',
+        error: `[${err.code}] ${err.message.slice(0, 400)}`,
+        errorCode: err.code,
+        attempts: err.attempts,
+      };
     }
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('Search term extraction failed:', msg);
-    return { terms: [], source: SEARCH_TERMS_MODEL, error: msg };
+    return { terms: fallback, source: 'local-fallback', error: msg };
   }
 }

@@ -16,8 +16,6 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-/** Vite HMR websocket port (fixed; never falls back to another port). */
-const HMR_PORT = 24678;
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -275,9 +273,7 @@ function exitPortInUse(port: number): never {
 async function startServer(): Promise<void> {
   const isProduction = process.env.NODE_ENV === 'production';
 
-  for (const port of isProduction ? [PORT] : [PORT, HMR_PORT]) {
-    if (await isPortInUse(port)) exitPortInUse(port);
-  }
+  if (await isPortInUse(PORT)) exitPortInUse(PORT);
 
   // Unknown /api paths get a JSON 404; an /api request must never fall through to index.html.
   // Registered after every /api route above and before Vite / static / SPA fallback.
@@ -290,7 +286,8 @@ async function startServer(): Promise<void> {
       server: {
         middlewareMode: true,
         strictPort: true,
-        hmr: process.env.DISABLE_HMR === 'true' ? false : { port: HMR_PORT },
+        hmr: false,
+        watch: null,
       },
       appType: 'spa',
     });

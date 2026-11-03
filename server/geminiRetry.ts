@@ -43,7 +43,7 @@ const MAX_JITTER_MS = 250;
  */
 const MAX_QUOTA_WAIT_SECONDS = 10;
 /** Breaker duration when Gemini reports a quota error without a retry delay. */
-const DEFAULT_QUOTA_COOLDOWN_SECONDS = 60;
+const DEFAULT_QUOTA_COOLDOWN_SECONDS = 15;
 
 /**
  * Quota circuit breaker, one per quota pool ('chat' for generateContent, 'embed' for
@@ -59,8 +59,11 @@ const quotaBlockedUntil = new Map<string, { until: number; message: string }>();
  * own breaker, so an exhausted search plan never pauses KB checks and vice versa.
  */
 export function quotaPoolOf(label: string): string {
-  if (label.startsWith('search.provider')) return 'search';
-  return label.startsWith('embed') ? 'embed' : 'chat';
+  if (label.startsWith('search.provider.duckduckgo')) return 'ddg';
+  if (label.startsWith('search.provider')) return 'search.provider';
+  if (label.startsWith('search')) return 'search.gemini';
+  if (label.startsWith('embed')) return 'embed';
+  return 'chat';
 }
 
 /** Seconds until the pool's breaker closes, or 0 when calls are allowed. */
@@ -129,7 +132,7 @@ export function parseRetryAfterSeconds(message: string): number | undefined {
   return undefined;
 }
 
-function statusOf(err: unknown): number | undefined {
+export function statusOf(err: unknown): number | undefined {
   if (err instanceof ApiError && typeof err.status === 'number') return err.status;
   // Any other error carrying an HTTP status (e.g. ProviderHttpError from a search provider).
   const ownStatus = typeof err === 'object' && err !== null ? (err as { status?: unknown }).status : undefined;
@@ -199,14 +202,14 @@ export async function withRetryDetailed<T>(fn: () => Promise<T>, label: string):
       if (c.kind === 'retryable' && attempt < MAX_ATTEMPTS) {
         // Jitter spreads simultaneous retries; it affects timing only.
         waitMs = BACKOFF_MS[Math.min(attempt - 1, BACKOFF_MS.length - 1)] + Math.floor(Math.random() * MAX_JITTER_MS);
-      } else if (
-        c.kind === 'quota' &&
-        !quotaRetried &&
-        c.retryAfterSeconds !== undefined &&
-        c.retryAfterSeconds <= MAX_QUOTA_WAIT_SECONDS
-      ) {
-        quotaRetried = true;
-        waitMs = Math.ceil(c.retryAfterSeconds * 1000);
+      } else if (c.kind === 'quota') {
+        if (!quotaRetried && c.retryAfterSeconds !== undefined && c.retryAfterSeconds <= MAX_QUOTA_WAIT_SECONDS) {
+          quotaRetried = true;
+          waitMs = Math.ceil(c.retryAfterSeconds * 1000);
+        } else if (attempt < 3 && (c.retryAfterSeconds === undefined || c.retryAfterSeconds <= 5)) {
+          // Short rate-limit burst (RPM spike) on free tier; wait and retry
+          waitMs = BACKOFF_MS[Math.min(attempt - 1, BACKOFF_MS.length - 1)] + Math.floor(Math.random() * MAX_JITTER_MS);
+        }
       }
 
       if (waitMs === undefined) {

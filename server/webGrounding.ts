@@ -111,7 +111,6 @@ async function callGroundedModel(ai: GoogleGenAI, q: string, timeoutMs: number):
       contents: `SEARCH TEXT:\n"""\n${q}\n"""`,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0,
         tools: [{ googleSearch: {} }],
         abortSignal: controller.signal,
       },
@@ -126,8 +125,8 @@ async function callGroundedModel(ai: GoogleGenAI, q: string, timeoutMs: number):
 }
 
 /**
- * Grounded search with retries. Throws UpstreamError on upstream outages / quota;
- * a response without grounding metadata returns no results with `error`.
+ * Grounded search with retries. On Google grounding quota or unavailable, falls back
+ * to server-side search (DuckDuckGo) so web retrieval continues working reliably.
  */
 export async function searchWebGroundedStrict(
   ai: GoogleGenAI,
@@ -140,14 +139,24 @@ export async function searchWebGroundedStrict(
   const key = cacheKey('web', WEB_GROUNDING_MODEL, q);
   const cached = cacheGet<{ results: GroundedSource[]; searchQueries: string[] }>(key);
   if (cached) return { ...cached, attempts: 0 };
-  const { value: meta, attempts } = await withRetryDetailed(() => callGroundedModel(ai, q, timeoutMs), 'search.web');
-  const searchQueries = meta?.webSearchQueries ?? [];
-  if (!meta) {
-    return { results: [], searchQueries, error: 'Model response contained no grounding metadata', attempts };
+
+  try {
+    const { value: meta, attempts } = await withRetryDetailed(() => callGroundedModel(ai, q, timeoutMs), 'search.web');
+    const searchQueries = meta?.webSearchQueries ?? [];
+    if (!meta) {
+      console.warn('Model response contained no grounding metadata; falling back to web search provider...');
+      return await searchExternalStrict('duckduckgo', q);
+    }
+    const results = mapGroundingMetadata(meta);
+    if (results.length > 0) cacheSet(key, { results, searchQueries });
+    return { results, searchQueries, attempts };
+  } catch (err) {
+    if (err instanceof UpstreamError && (err.code === 'QUOTA_EXCEEDED' || err.code === 'UPSTREAM_UNAVAILABLE')) {
+      console.warn(`[search.web] Google search grounding ${err.code}; falling back to search provider...`);
+      return await searchExternalStrict('duckduckgo', q);
+    }
+    throw err;
   }
-  const results = mapGroundingMetadata(meta);
-  if (results.length > 0) cacheSet(key, { results, searchQueries });
-  return { results, searchQueries, attempts };
 }
 
 /** One external-provider attempt with its own timeout. */
