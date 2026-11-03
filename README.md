@@ -62,3 +62,8 @@ GroundCheck / AuditLens checks every LLM response against a knowledge base of tr
 - **Icons:** Lucide React
 - **Storage:** Exasol Personal schema emulation with persistent local storage
 - **Verification Engine:** Semantic tokenizer, subword n-gram vector matcher, contradiction penalty logic, and cosine similarity scoring.
+
+## Author
+
+- **Raghul K** — raghul.k2023@vitstudent.ac.in
+  School of Computer Science and Engineering, Vellore Institute of Technology, Vellore, India

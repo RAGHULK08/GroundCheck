@@ -2,5 +2,11 @@
   "name": "GroundCheck / AuditLens",
   "description": "LLM output verification and audit-trail governance layer built for Exasol",
   "version": "1.0.0",
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "author": {
+    "name": "Raghul K",
+    "email": "raghul.k2023@vitstudent.ac.in"
+  },
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
