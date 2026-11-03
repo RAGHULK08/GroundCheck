@@ -67,7 +67,7 @@ GROUP BY CAST(CREATED_AT AS DATE), MODEL_NAME;`;
           <div className="flex items-center gap-2.5">
             <Database className="w-5 h-5 text-purple-400" />
             <h3 className="font-bold text-white text-base">
-              Exasol Personal System of Record
+              Exasol Schema (target system of record)
             </h3>
           </div>
           <button
@@ -84,20 +84,21 @@ GROUP BY CAST(CREATED_AT AS DATE), MODEL_NAME;`;
           <div className="p-4 rounded-xl bg-purple-950/30 border border-purple-500/30 text-xs text-purple-200 space-y-2">
             <div className="font-semibold text-sm text-purple-100 flex items-center gap-1.5">
               <Shield className="w-4 h-4 text-purple-400" />
-              How Exasol Personal Powers GroundCheck / AuditLens
+              Designed for Exasol Personal
             </div>
             <p className="leading-relaxed">
-              Exasol isn&apos;t a bolt-on data store here — it&apos;s the system of record the whole project depends on:
+              This schema is the intended Exasol system of record. No Exasol connection is configured in this build:
+              the counts below are the records currently held in this browser&apos;s local storage.
             </p>
             <ul className="list-disc list-inside space-y-1 text-purple-300/90 pl-1">
               <li>
-                <strong className="text-white">KNOWLEDGE_BASE (table):</strong> Source-of-truth documents and embeddings ({kbCount} rows loaded).
+                <strong className="text-white">KNOWLEDGE_BASE (table):</strong> Source-of-truth documents and embeddings ({kbCount} documents in local storage).
               </li>
               <li>
-                <strong className="text-white">CHECKS (table):</strong> Append-only audit log: every prompt, response, verdict, confidence score, and flagged span ({checksCount} rows recorded).
+                <strong className="text-white">CHECKS (table):</strong> Append-only audit log: every prompt, response, verdict, confidence score, and flagged span ({checksCount} checks in local storage).
               </li>
               <li>
-                <strong className="text-white">DAILY_MODEL_STATS (view):</strong> Native SQL rollup of hallucination rate per model, per day — no external BI tool needed.
+                <strong className="text-white">DAILY_MODEL_STATS (view):</strong> SQL rollup of hallucination rate per model, per day. In this build the same rollup is computed in the browser.
               </li>
             </ul>
           </div>

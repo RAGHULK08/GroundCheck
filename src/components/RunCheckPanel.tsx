@@ -7,18 +7,13 @@ import {
   AlertTriangle,
   CheckCircle,
   XCircle,
-  ArrowRight,
   Clock,
-  ShieldAlert,
   Globe,
-  ExternalLink,
-  FileText,
-  BookOpen,
   HelpCircle,
   Activity,
-  Layers,
 } from 'lucide-react';
 import { VerificationResult, Verdict } from '../types/groundcheck';
+import { ClaimLogCard, FlagChip, getClaimFlags } from './ClaimLogCard';
 
 interface RunCheckPanelProps {
   onRunCheck: (
@@ -250,11 +245,11 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
                 <div className="font-semibold text-slate-200 flex items-center gap-2">
                   <span>Web Search Fallback</span>
                   <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-cyan-900/60 text-cyan-300 border border-cyan-500/30">
-                    Live Retrieval
+                    Google Search grounding
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-400">
-                  Perform live external web search if information is missing from the local Exasol database. If neither is found, status becomes UNVERIFIABLE (&ldquo;Not covered by the knowledge base&rdquo;).
+                  Searches the web through Gemini&apos;s Google Search grounding for each claim. Web sources count as support only if they are similar to and entail the claim, and they are marked lower trust than the knowledge base. If neither source covers a claim, it becomes UNVERIFIABLE.
                 </div>
               </div>
             </div>
@@ -291,7 +286,7 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
               {isVerifying ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span>Evaluating NLI on Top 3 Chunks &amp; Web...</span>
+                  <span>Running embeddings, NLI &amp; web search...</span>
                 </>
               ) : (
                 <>
@@ -302,7 +297,7 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
             </button>
 
             <span className="text-xs text-slate-500 font-mono">
-              Auto-logs Top 3 Chunks, NLI Probabilities &amp; Web Results to Exasol
+              Each check (claims, top 3 chunks, NLI, web results) is saved in this browser&apos;s local storage
             </span>
           </div>
 
@@ -320,9 +315,22 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
                   {latestResult.usedWebSearch && (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-mono font-medium bg-cyan-950/80 border border-cyan-500/40 text-cyan-300">
                       <Globe className="w-3 h-3 text-cyan-400" />
-                      <span>Web Search Used</span>
+                      <span>Google Search grounding</span>
                     </span>
                   )}
+                  {(() => {
+                    const flags = latestResult.claimsAnalysis.map(getClaimFlags);
+                    const unavailable = flags.filter((f) => f.searchUnavailable).length;
+                    const degraded = flags.filter((f) => f.queryDegraded).length;
+                    const nliErrors = flags.reduce((n, f) => n + f.nliErrors, 0);
+                    return (
+                      <>
+                        {unavailable > 0 && <FlagChip label={`Search unavailable (${unavailable} claim${unavailable > 1 ? 's' : ''})`} />}
+                        {degraded > 0 && <FlagChip label={`Query degraded (${degraded} claim${degraded > 1 ? 's' : ''})`} />}
+                        {nliErrors > 0 && <FlagChip label={`NLI errors: ${nliErrors}`} />}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 <div className="flex items-center gap-4 text-xs font-mono text-slate-300">
@@ -347,175 +355,21 @@ export const RunCheckPanel: React.FC<RunCheckPanelProps> = ({
                   <div className="flex items-center justify-between">
                     <div className="text-xs font-semibold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
                       <Activity className="w-4 h-4 text-cyan-400" />
-                      <span>Per-Claim Top 3 Chunks, NLI Probabilities &amp; Web Results:</span>
+                      <span>Per-claim log: top 3 chunks, NLI &amp; web evidence</span>
                     </div>
                     <span className="text-[11px] font-mono text-slate-400">
-                      Top 3 chunks evaluated for every claim
+                      NLI runs on the top 3 chunks for every claim
                     </span>
                   </div>
 
                   <div className="space-y-3">
                     {latestResult.claimsAnalysis.map((claimItem, cIdx) => (
-                      <div
+                      <ClaimLogCard
                         key={claimItem.claimId}
-                        className="p-4 bg-slate-950/90 border border-slate-800 rounded-xl space-y-3 transition hover:border-slate-700"
-                      >
-                        {/* Claim Header & Status */}
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-800/80">
-                          <div className="space-y-0.5">
-                            <span className="text-[11px] font-mono text-slate-500 uppercase tracking-wider">
-                              Claim #{cIdx + 1}
-                            </span>
-                            <div className="text-sm font-semibold text-slate-100">
-                              &ldquo;{claimItem.text}&rdquo;
-                            </div>
-                          </div>
-
-                          <div className="self-start sm:self-auto shrink-0">
-                            {claimItem.status === 'GROUNDED' ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-950/80 border border-emerald-500/40 text-emerald-300">
-                                <CheckCircle className="w-3 h-3 text-emerald-400" />
-                                GROUNDED
-                              </span>
-                            ) : claimItem.status === 'UNVERIFIABLE' ? (
-                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-950/80 border border-amber-500/40 text-amber-300">
-                                <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
-                                <span className="font-bold">UNVERIFIABLE</span>
-                                <span className="text-[11px] text-amber-300/80">
-                                  — Not covered by the knowledge base
-                                </span>
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-950/80 border border-rose-500/40 text-rose-300">
-                                <XCircle className="w-3 h-3 text-rose-400" />
-                                HALLUCINATED
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Status Reason */}
-                        <div className="text-xs text-slate-300 flex items-center gap-1.5">
-                          <ArrowRight className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                          <span>{claimItem.statusReason}</span>
-                        </div>
-
-                        {/* Top 3 Knowledge Base Chunks with Similarity Scores */}
-                        <div className="space-y-1.5">
-                          <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                            <Layers className="w-3 h-3 text-blue-400" />
-                            <span>Top 3 Knowledge Base Chunks (Similarity Scores):</span>
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                            {claimItem.top3Chunks.map((chunk, chkIdx) => (
-                              <div
-                                key={chunk.chunkId}
-                                className="p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs space-y-1.5"
-                              >
-                                <div className="flex items-center justify-between text-[10px] font-mono">
-                                  <span className="text-slate-400">
-                                    Chunk #{chkIdx + 1}: {chunk.docTitle}
-                                  </span>
-                                  <span
-                                    className={`px-1.5 py-0.2 rounded font-bold ${
-                                      chunk.similarity >= 0.60
-                                        ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
-                                        : chunk.similarity >= 0.30
-                                        ? 'bg-cyan-950 text-cyan-300 border border-cyan-500/30'
-                                        : 'bg-slate-800 text-slate-400'
-                                    }`}
-                                  >
-                                    Sim: {chunk.similarity.toFixed(2)}
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-slate-300 line-clamp-3 italic">
-                                  &ldquo;{chunk.text}&rdquo;
-                                </p>
-
-                                {/* Per-chunk NLI Probabilities */}
-                                <div className="pt-1 border-t border-slate-800/80 space-y-1">
-                                  <div className="text-[10px] font-mono text-slate-400 flex justify-between">
-                                    <span>NLI:</span>
-                                    <span>
-                                      E: {(chunk.nli.entailment * 100).toFixed(0)}% | N:{' '}
-                                      {(chunk.nli.neutral * 100).toFixed(0)}% | C:{' '}
-                                      {(chunk.nli.contradiction * 100).toFixed(0)}%
-                                    </span>
-                                  </div>
-                                  <div className="w-full h-1.5 rounded-full overflow-hidden flex bg-slate-800">
-                                    <div
-                                      style={{ width: `${chunk.nli.entailment * 100}%` }}
-                                      className="bg-emerald-500 h-full"
-                                      title={`Entailment: ${(chunk.nli.entailment * 100).toFixed(1)}%`}
-                                    />
-                                    <div
-                                      style={{ width: `${chunk.nli.neutral * 100}%` }}
-                                      className="bg-slate-500 h-full"
-                                      title={`Neutral: ${(chunk.nli.neutral * 100).toFixed(1)}%`}
-                                    />
-                                    <div
-                                      style={{ width: `${chunk.nli.contradiction * 100}%` }}
-                                      className="bg-rose-500 h-full"
-                                      title={`Contradiction: ${(chunk.nli.contradiction * 100).toFixed(1)}%`}
-                                    />
-                                  </div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        {/* Web Results for this Claim */}
-                        <div className="space-y-1.5 pt-1">
-                          <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between">
-                            <div className="flex items-center gap-1">
-                              <Globe className="w-3 h-3 text-cyan-400" />
-                              <span>Web Search Results for Claim:</span>
-                            </div>
-                            <span className="text-[10px] font-mono text-slate-500">
-                              Best Web Match: {(claimItem.bestWebScore * 100).toFixed(0)}%
-                            </span>
-                          </div>
-
-                          {claimItem.webResults && claimItem.webResults.length > 0 ? (
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                              {claimItem.webResults.slice(0, 2).map((web, wIdx) => (
-                                <div
-                                  key={wIdx}
-                                  className="p-2.5 bg-slate-900/70 border border-slate-800/80 rounded-lg text-xs space-y-1"
-                                >
-                                  <div className="flex items-center justify-between gap-1">
-                                    <span className="font-semibold text-slate-200 truncate">
-                                      {web.title}
-                                    </span>
-                                    {web.url && (
-                                      <a
-                                        href={web.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-cyan-400 hover:text-cyan-300 inline-flex items-center gap-0.5 text-[10px] shrink-0 font-mono"
-                                      >
-                                        <span>Link</span>
-                                        <ExternalLink className="w-2.5 h-2.5" />
-                                      </a>
-                                    )}
-                                  </div>
-                                  <p className="text-[11px] text-slate-300 line-clamp-2 italic">
-                                    &ldquo;{web.snippet}&rdquo;
-                                  </p>
-                                  <div className="text-[10px] font-mono text-slate-500">
-                                    Domain: <span className="text-slate-400">{web.sourceDomain}</span>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="p-2 rounded bg-slate-900 border border-slate-800/80 text-[11px] text-slate-500 italic">
-                              No external web results retrieved for this claim.
-                            </div>
-                          )}
-                        </div>
-                      </div>
+                        claim={claimItem}
+                        index={cIdx + 1}
+                        webSearchEnabled={latestResult.usedWebSearch}
+                      />
                     ))}
                   </div>
                 </div>

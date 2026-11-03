@@ -1,5 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
-
 /**
  * Typed error for embedding operations
  */
@@ -14,7 +12,7 @@ export class EmbeddingError extends Error {
 }
 
 /**
- * Standard embedding model for Gemini API
+ * Embedding model used by the server-side /api/embeddings route (informational)
  */
 export const EMBEDDING_MODEL = 'gemini-embedding-2-preview';
 
@@ -114,25 +112,6 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Create GoogleGenAI client using process.env or import.meta.env
- */
-function getAIClient(): GoogleGenAI {
-  const apiKey =
-    (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) ||
-    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GEMINI_API_KEY) ||
-    '';
-
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-}
-
-/**
  * Call server-side /api/embeddings route
  */
 async function callServerEmbeddings(texts: string[]): Promise<number[][]> {
@@ -159,7 +138,7 @@ async function callServerEmbeddings(texts: string[]): Promise<number[][]> {
 }
 
 /**
- * Embed multiple texts using Gemini embeddings model through @google/genai,
+ * Embed multiple texts via the server-side /api/embeddings route (Gemini),
  * with caching in-memory and mirrored to localStorage.
  */
 export async function embedTexts(texts: string[]): Promise<number[][]> {
@@ -188,44 +167,9 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
     return results as number[][];
   }
 
-  // Call server-side embedding endpoint with direct SDK fallback
+  // All Gemini calls happen server-side; the API key never reaches the browser.
   try {
-    let embeddedVectors: number[][] = [];
-    try {
-      embeddedVectors = await callServerEmbeddings(uncachedTexts);
-    } catch (serverError) {
-      const directKey =
-        (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) ||
-        (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GEMINI_API_KEY) ||
-        '';
-
-      if (!directKey) {
-        throw serverError;
-      }
-
-      const ai = getAIClient();
-      const response = await ai.models.embedContent({
-        model: EMBEDDING_MODEL,
-        contents: uncachedTexts,
-      });
-
-      const embeddingsList: { values?: number[] }[] = [];
-      if (Array.isArray(response.embeddings)) {
-        for (const item of response.embeddings) {
-          if (item) embeddingsList.push(item);
-        }
-      } else if ('embedding' in response && response.embedding) {
-        embeddingsList.push(response.embedding as { values?: number[] });
-      }
-
-      if (embeddingsList.length !== uncachedTexts.length) {
-        throw new EmbeddingError(
-          `Embedding response mismatch: expected ${uncachedTexts.length} embeddings, got ${embeddingsList.length}`
-        );
-      }
-
-      embeddedVectors = embeddingsList.map((e) => normalizeVector(e.values ?? []));
-    }
+    const embeddedVectors = await callServerEmbeddings(uncachedTexts);
 
     let cacheUpdated = false;
 

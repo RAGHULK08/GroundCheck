@@ -67,7 +67,7 @@ export const HallucinationChart: React.FC<HallucinationChartProps> = ({ stats })
             <span>Hallucination rate over time (by model)</span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Aggregated live via Exasol SQL view <code className="text-cyan-400 font-mono">DAILY_MODEL_STATS</code>
+            Aggregated in the browser (same logic as the Exasol view <code className="text-cyan-400 font-mono">DAILY_MODEL_STATS</code>)
           </p>
         </div>
 

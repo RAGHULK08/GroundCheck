@@ -3,15 +3,18 @@ import {
   FlaggedSpan,
   VerificationResult,
   Verdict,
-  ClaimStatus,
   Citation,
   ChunkMatch,
   ClaimAnalysis,
   NLIProbabilities,
+  WebEvidenceMatch,
 } from '../types/groundcheck';
-import { performWebSearch, WebSearchResult } from './webSearch';
+import { performWebSearchDetailed, WebSearchResult } from './webSearch';
 import { embedTexts, cosineSimilarity, EmbeddingError } from './embeddings';
 import { judgeEntailment, judgeEntailmentBatch } from './nli';
+import { findQuantityConflict, QuantityConflictResult } from './conflictCheck';
+import { classifyClaim, computeOverallVerdict } from './claimClassifier';
+import { buildSearchQuery, SearchQuery } from './queryBuilder';
 
 export interface SimilarityResult {
   score: number;
@@ -31,66 +34,16 @@ export function splitIntoClaims(text: string): string[] {
 }
 
 /**
- * Extract numerical claims and key negation/policy tokens to detect subtle contradictions.
+ * Deterministic quantity-conflict check against the BEST-matching chunk only.
+ * Checking only the best match avoids flagging values that are merely absent from,
+ * or stated for a different topic in, unrelated chunks.
  */
-export function checkContradictions(
+export function checkBestChunkQuantityConflict(
   claim: string,
-  docContent: string
-): { contradicted: boolean; penaltyReason?: string } {
-  const lowerClaim = claim.toLowerCase();
-  const lowerDoc = docContent.toLowerCase();
-
-  // Numbers check: extract numbers from claim
-  const claimNumbers = claim.match(/\b\d+(\.\d+)?\b/g);
-  if (claimNumbers) {
-    for (const num of claimNumbers) {
-      if (!lowerDoc.includes(num)) {
-        if (lowerClaim.includes('day') && lowerDoc.includes('day')) {
-          return {
-            contradicted: true,
-            penaltyReason: `Conflict in timeframe: claim states ${num} days, which contradicts source policy`,
-          };
-        }
-        if (lowerClaim.includes('rupee') && lowerDoc.includes('rupee')) {
-          return {
-            contradicted: true,
-            penaltyReason: `Conflict in monetary threshold: claim states ${num} rupees`,
-          };
-        }
-      }
-    }
-  }
-
-  // Negation conflict check (e.g. refundable vs non-refundable)
-  if (
-    lowerClaim.includes('refundable') &&
-    !lowerClaim.includes('non-refundable') &&
-    !lowerClaim.includes('not refundable') &&
-    (lowerDoc.includes('non-refundable') || lowerDoc.includes('not refundable')) &&
-    (lowerClaim.includes('digital') || lowerClaim.includes('gift card'))
-  ) {
-    return {
-      contradicted: true,
-      penaltyReason:
-        'Contradiction: policy explicitly states digital products and gift cards are non-refundable',
-    };
-  }
-
-  if (lowerClaim.includes('no questions asked') && !lowerDoc.includes('no questions asked')) {
-    return {
-      contradicted: true,
-      penaltyReason: 'Contradiction: "no questions asked" contradicts conditions in original policy',
-    };
-  }
-
-  if (lowerClaim.includes('without receipt') && !lowerDoc.includes('without receipt')) {
-    return {
-      contradicted: true,
-      penaltyReason: 'Contradiction: source requires order number and original packaging',
-    };
-  }
-
-  return { contradicted: false };
+  bestChunk: ChunkMatch | undefined
+): QuantityConflictResult {
+  if (!bestChunk) return { conflict: false };
+  return findQuantityConflict(claim, bestChunk.text);
 }
 
 /**
@@ -150,10 +103,138 @@ export function extractKbChunks(
   return chunks;
 }
 
+export interface WebEvidenceResult {
+  results: WebSearchResult[];
+  bestScore: number;
+  bestResult: WebSearchResult | null;
+  /** The query actually sent, when web search was enabled. */
+  query?: SearchQuery;
+  /** Scored non-echo snippets, best similarity first; the best 3 carry NLI. */
+  matches: WebEvidenceMatch[];
+  /** Set when web search was enabled but failed or returned nothing usable. */
+  error?: string;
+  /** Snippets dropped because they restate the claim or query. */
+  echoesDiscarded: number;
+}
+
+/** Number of web snippets that get an NLI judgment. */
+export const WEB_NLI_TOP_K = 3;
+
+function normalizeForEcho(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function contentTokens(normalized: string): string[] {
+  return normalized.split(' ').filter((t) => t.length >= 3);
+}
+
+/**
+ * True if a snippet merely restates the claim or the search query: it contains either
+ * one verbatim (after normalization), or it is a short text made almost entirely of the
+ * claim's words. Such snippets would trivially "entail" the claim, so they are never scored.
+ */
+export function snippetEchoesQuery(snippet: string, claim: string, query: string): boolean {
+  const s = normalizeForEcho(snippet);
+  const c = normalizeForEcho(claim);
+  const q = normalizeForEcho(query);
+  if (!s) return true;
+  if ((c && s.includes(c)) || (q && s.includes(q))) return true;
+
+  const claimTokens = contentTokens(c);
+  const snippetTokens = contentTokens(s);
+  if (claimTokens.length < 5 || snippetTokens.length > claimTokens.length * 1.5) return false;
+  const snippetSet = new Set(snippetTokens);
+  const covered = claimTokens.filter((t) => snippetSet.has(t)).length;
+  return covered / claimTokens.length >= 0.9;
+}
+
+/**
+ * Retrieve grounded web sources for a claim (query from queryBuilder), drop echo snippets,
+ * score the rest against the claim with embeddings, and run NLI on the best 3.
+ * Failures are recorded in `error`, never hidden.
+ */
+async function gatherWebEvidence(prompt: string, claim: string, enabled: boolean): Promise<WebEvidenceResult> {
+  const evidence: WebEvidenceResult = { results: [], bestScore: 0, bestResult: null, matches: [], echoesDiscarded: 0 };
+  if (!enabled) return evidence;
+  try {
+    evidence.query = await buildSearchQuery(prompt, claim);
+    const outcome = await performWebSearchDetailed(evidence.query.text);
+    evidence.results = outcome.results;
+    if (outcome.error) {
+      evidence.error = outcome.error;
+      return evidence;
+    }
+
+    const candidates = outcome.results.filter((r) => !snippetEchoesQuery(r.snippet, claim, evidence.query?.text ?? ''));
+    evidence.echoesDiscarded = outcome.results.length - candidates.length;
+    if (candidates.length === 0) {
+      evidence.error =
+        outcome.results.length === 0
+          ? 'Web search returned no grounded sources'
+          : `All ${outcome.results.length} web snippet(s) restated the claim/query and were discarded`;
+      return evidence;
+    }
+
+    // Batch-embed claim + snippets once; computeSimilarity then hits the cache.
+    await embedTexts([claim, ...candidates.map((r) => r.snippet)]);
+    const scored: WebEvidenceMatch[] = [];
+    for (const result of candidates) {
+      const { score } = await computeSimilarity(claim, result.snippet);
+      scored.push({ result, similarity: Math.round(score * 100) / 100 });
+    }
+    scored.sort((a, b) => b.similarity - a.similarity);
+
+    const top = scored.slice(0, WEB_NLI_TOP_K);
+    const judgments = await judgeEntailmentBatch(top.map((m) => ({ premise: m.result.snippet, hypothesis: claim })));
+    top.forEach((m, i) => {
+      m.nli = judgments[i];
+    });
+
+    evidence.matches = scored;
+    evidence.bestScore = scored[0].similarity;
+    evidence.bestResult = scored[0].result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('Web evidence scoring failed during verification:', msg);
+    evidence.error = `Web evidence scoring failed: ${msg}`;
+  }
+  return evidence;
+}
+
+function buildKbCitation(chunk: ChunkMatch, claim: string): Citation {
+  return {
+    sourceType: 'local',
+    title: chunk.docTitle,
+    source: `KNOWLEDGE_BASE [${chunk.chunkId}]`,
+    docId: chunk.docId,
+    snippet: chunk.text,
+    similarityScore: chunk.similarity,
+    claimText: claim,
+    trust: 'high',
+  };
+}
+
+function buildWebCitation(result: WebSearchResult, score: number, claim: string): Citation {
+  return {
+    trust: 'lower',
+    sourceType: 'web',
+    title: result.title,
+    source: result.sourceDomain,
+    url: result.url,
+    snippet: result.snippet,
+    similarityScore: score,
+    claimText: claim,
+  };
+}
+
 /**
  * Run verification on a response against the local knowledge base,
- * with NLI model evaluation on the top 3 chunks for every claim,
- * and updated verdict logic with the UNVERIFIABLE status.
+ * with NLI on the top 3 chunks for every claim. Orchestrates I/O (embeddings, NLI,
+ * web search) and delegates every decision to the pure helpers in claimClassifier.ts.
  */
 export async function verifyResponse(
   prompt: string,
@@ -226,116 +307,38 @@ export async function verifyResponse(
       usedDocIds.add(top3Chunks[0].docId);
     }
 
-    // Check if any of top 3 chunks indicates contradiction
-    let isContradicted = false;
-    let contradictionReason = '';
-    for (let i = 0; i < top3Chunks.length; i++) {
-      if (top3Chunks[i].nli.contradiction >= 0.50) {
-        isContradicted = true;
-        contradictionReason = `Contradicted by KB evidence in ${top3Chunks[i].docTitle} (contradiction prob: ${(
-          top3Chunks[i].nli.contradiction * 100
-        ).toFixed(1)}%)`;
-        break;
+    // 3. Deterministic quantity check against the best-matching chunk only.
+    const quantityConflict = checkBestChunkQuantityConflict(claim, top3Chunks[0]);
+
+    // 4. Grounded web evidence (lower trust), scored with embeddings + NLI.
+    const web = await gatherWebEvidence(prompt, claim, enableWebSearch);
+    if (enableWebSearch) didUseWebSearch = true;
+
+    // 5. Pure decision.
+    const decision = classifyClaim({
+      claim,
+      top3Chunks,
+      quantityConflict,
+      threshold,
+      promptKbScore,
+      web: { bestScore: web.bestScore, bestResult: web.bestResult, matches: web.matches, error: web.error },
+    });
+    scores.push(decision.score);
+
+    if (decision.status === 'GROUNDED') {
+      if (decision.supportingChunk) {
+        citations.push(buildKbCitation(decision.supportingChunk, claim));
+      } else if (decision.supportingWeb) {
+        citations.push(buildWebCitation(decision.supportingWeb.result, decision.supportingWeb.similarity, claim));
       }
-    }
-
-    // 3. Web Search evaluation
-    let webResults: WebSearchResult[] = [];
-    let bestWebScore = 0;
-    let bestWebResult: WebSearchResult | null = null;
-
-    if (enableWebSearch) {
-      didUseWebSearch = true;
-      try {
-        webResults = await performWebSearch(`${prompt} ${claim}`.trim());
-        for (const item of webResults) {
-          const { score: wScore } = await computeSimilarity(claim, item.snippet);
-          if (wScore > bestWebScore) {
-            bestWebScore = Math.round(wScore * 100) / 100;
-            bestWebResult = item;
-          }
-        }
-      } catch (err) {
-        console.warn('Web search error during verification:', err);
-      }
-    }
-
-    // 4. Apply User's Verdict Rules:
-    // - UNVERIFIABLE: for claims where the best KB similarity is below 0.30 and web search finds nothing relevant (< 0.30)
-    // - HALLUCINATED: ONLY when a claim is CONTRADICTED by KB evidence, OR is unsupported and the question's top KB similarity is above 0.30
-    // - GROUNDED: when supported by KB or Web evidence (>= threshold)
-    let claimStatus: ClaimStatus;
-    let statusReason = '';
-
-    if (isContradicted) {
-      // Contradicted by KB evidence -> HALLUCINATED
-      claimStatus = 'HALLUCINATED';
-      statusReason = contradictionReason;
-      scores.push(Math.min(bestKbScore, 0.35));
-    } else if (bestKbScore >= threshold) {
-      // Supported by KB evidence -> GROUNDED
-      claimStatus = 'GROUNDED';
-      statusReason = `Supported by ${top3Chunks[0].docTitle} (${(bestKbScore * 100).toFixed(0)}% match, ${(
-        top3Chunks[0].nli.entailment * 100
-      ).toFixed(0)}% entailment)`;
-      scores.push(bestKbScore);
-
-      citations.push({
-        sourceType: 'local',
-        title: top3Chunks[0].docTitle,
-        source: `KNOWLEDGE_BASE [${top3Chunks[0].chunkId}]`,
-        docId: top3Chunks[0].docId,
-        snippet: top3Chunks[0].text,
-        similarityScore: bestKbScore,
-        claimText: claim,
-      });
-    } else if (bestWebScore >= threshold && bestWebResult) {
-      // Supported by Web Search -> GROUNDED
-      claimStatus = 'GROUNDED';
-      statusReason = `Supported by web search grounding: ${bestWebResult.title} (${(bestWebScore * 100).toFixed(0)}% match)`;
-      scores.push(bestWebScore);
-
-      citations.push({
-        sourceType: 'web',
-        title: bestWebResult.title,
-        source: bestWebResult.sourceDomain,
-        url: bestWebResult.url,
-        snippet: bestWebResult.snippet,
-        similarityScore: bestWebScore,
-        claimText: claim,
-      });
     } else {
-      // Unsupported claim: determine whether UNVERIFIABLE or HALLUCINATED
-      const webRelevant = bestWebScore >= 0.30;
-
-      if (bestKbScore < 0.30 && !webRelevant) {
-        // Best KB similarity is below 0.30 and web search finds nothing relevant
-        claimStatus = 'UNVERIFIABLE';
-        statusReason = 'Not covered by the knowledge base';
-        scores.push(Math.max(bestKbScore, bestWebScore));
-      } else if (promptKbScore > 0.30 || bestKbScore >= 0.30) {
-        // Unsupported while question's top KB similarity is above 0.30 -> HALLUCINATED
-        claimStatus = 'HALLUCINATED';
-        statusReason = `Unsupported claim on a covered topic (question KB match: ${(promptKbScore * 100).toFixed(
-          0
-        )}% > 30%, best claim KB match: ${(bestKbScore * 100).toFixed(0)}%)`;
-        scores.push(Math.max(bestKbScore, bestWebScore));
-      } else {
-        claimStatus = 'UNVERIFIABLE';
-        statusReason = 'Not covered by the knowledge base';
-        scores.push(Math.max(bestKbScore, bestWebScore));
-      }
-    }
-
-    // Record flagged spans if not grounded
-    if (claimStatus !== 'GROUNDED') {
       flaggedSpans.push({
         text: claim,
-        reason: statusReason,
+        reason: decision.reason,
         closestDocId: top3Chunks[0]?.docId || 'unknown',
         closestDocTitle: top3Chunks[0]?.docTitle || 'None',
-        score: Math.max(bestKbScore, bestWebScore),
-        status: claimStatus,
+        score: Math.max(bestKbScore, web.bestScore),
+        status: decision.status,
         webSearched: enableWebSearch,
       });
     }
@@ -343,38 +346,27 @@ export async function verifyResponse(
     claimsAnalysis.push({
       claimId: `clm-${cIdx + 1}`,
       text: claim,
-      status: claimStatus,
-      statusReason,
+      status: decision.status,
+      statusReason: decision.reason,
       bestKbScore,
       top3Chunks,
-      webResults,
-      bestWebScore,
-      isContradicted,
+      webResults: web.results,
+      bestWebScore: web.bestScore,
+      isContradicted: decision.isContradicted,
+      contradictionSource: decision.contradictionSource,
+      supportingChunkId: decision.supportingChunk?.chunkId,
+      searchQuery: web.query?.text,
+      searchEntities: web.query?.entities,
+      searchQueryDegraded: web.query?.degraded,
+      searchQueryError: web.query?.error,
+      webMatches: enableWebSearch ? web.matches : undefined,
+      webSearchError: web.error,
+      webEchoesDiscarded: web.echoesDiscarded > 0 ? web.echoesDiscarded : undefined,
     });
   }
 
-  // Calculate Overall Check Verdict
-  const numHallucinated = claimsAnalysis.filter((c) => c.status === 'HALLUCINATED').length;
-  const numUnverifiable = claimsAnalysis.filter((c) => c.status === 'UNVERIFIABLE').length;
-  const numGrounded = claimsAnalysis.filter((c) => c.status === 'GROUNDED').length;
   const totalClaims = claimsAnalysis.length;
-
-  let overallVerdict: Verdict;
-  if (numHallucinated > 0) {
-    if (numHallucinated === totalClaims) {
-      overallVerdict = 'HALLUCINATED';
-    } else {
-      overallVerdict = 'PARTIAL';
-    }
-  } else if (numUnverifiable > 0) {
-    if (numUnverifiable === totalClaims) {
-      overallVerdict = 'UNVERIFIABLE';
-    } else {
-      overallVerdict = 'PARTIAL';
-    }
-  } else {
-    overallVerdict = 'GROUNDED';
-  }
+  const overallVerdict: Verdict = computeOverallVerdict(claimsAnalysis.map((c) => c.status));
 
   const avgConfidence = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0.0;
   const latencyMs = Math.round((performance.now() - start) * 10) / 10;

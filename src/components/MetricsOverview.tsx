@@ -29,7 +29,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ checks }) => {
             {total}
           </div>
           <p className="text-[11px] text-slate-500 mt-0.5">
-            Exasol <code className="text-cyan-400">CHECKS</code> table
+            Stored in browser local storage
           </p>
         </div>
       </div>

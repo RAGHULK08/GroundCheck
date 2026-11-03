@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Sparkles, Scale } from 'lucide-react';
+import { Sparkles, Scale, FlaskConical } from 'lucide-react';
 import { Header } from './components/Header';
 import { RunCheckPanel } from './components/RunCheckPanel';
 import { MetricsOverview } from './components/MetricsOverview';
@@ -9,6 +9,7 @@ import { DrillDownInspector } from './components/DrillDownInspector';
 import { ModelComparisonView } from './components/ModelComparisonView';
 import { KnowledgeBaseModal } from './components/KnowledgeBaseModal';
 import { ExasolModal } from './components/ExasolModal';
+import { TestSuitePanel } from './components/TestSuitePanel';
 import {
   CheckRecord,
   KnowledgeBaseDoc,
@@ -27,6 +28,8 @@ import {
   INITIAL_DOCS,
 } from './services/storage';
 import { verifyResponse } from './services/verifier';
+import { runTestCases, TestReport } from './services/testRunner';
+import { VERIFIER_TEST_CASES } from './services/verifier.test-cases';
 
 export const App: React.FC = () => {
   const [kbDocs, setKbDocs] = useState<KnowledgeBaseDoc[]>(() => loadKnowledgeBase());
@@ -45,7 +48,24 @@ export const App: React.FC = () => {
 
   const [isKbModalOpen, setIsKbModalOpen] = useState(false);
   const [isSchemaModalOpen, setIsSchemaModalOpen] = useState(false);
-  const [activeView, setActiveView] = useState<'single' | 'benchmark'>('single');
+  const [activeView, setActiveView] = useState<'single' | 'benchmark' | 'tests'>('single');
+  const [testReport, setTestReport] = useState<TestReport | null>(null);
+  const [isRunningTests, setIsRunningTests] = useState(false);
+  const [testProgress, setTestProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const handleRunTests = async (): Promise<void> => {
+    setIsRunningTests(true);
+    setTestProgress({ done: 0, total: VERIFIER_TEST_CASES.length });
+    try {
+      const report = await runTestCases({
+        onProgress: (done, total) => setTestProgress({ done, total }),
+      });
+      setTestReport(report);
+    } finally {
+      setIsRunningTests(false);
+      setTestProgress(null);
+    }
+  };
 
   // Compute daily model stats (view emulation)
   const dailyStats = useMemo(() => calculateDailyModelStats(checks), [checks]);
@@ -99,6 +119,7 @@ export const App: React.FC = () => {
         createdAt: new Date().toISOString(),
         citations: result.citations,
         usedWebSearch: result.usedWebSearch,
+        claimsAnalysis: result.claimsAnalysis,
       };
 
       const updated = appendCheck(newRecord);
@@ -193,12 +214,26 @@ export const App: React.FC = () => {
                 Benchmark
               </span>
             </button>
+
+            <button
+              onClick={() => setActiveView('tests')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                activeView === 'tests'
+                  ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/20'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              <FlaskConical className="w-3.5 h-3.5" />
+              <span>Test Suite</span>
+            </button>
           </div>
 
           <div className="text-[11px] font-mono text-slate-500 px-2 hidden sm:block">
             {activeView === 'single'
-              ? 'Verifying individual prompts against Exasol KB'
-              : 'Multi-LLM comparative benchmarking'}
+              ? 'Verifying individual prompts against the local knowledge base'
+              : activeView === 'benchmark'
+              ? 'Multi-LLM comparative benchmarking'
+              : 'Labelled cases against the default refund & shipping policies'}
           </div>
         </div>
 
@@ -209,6 +244,14 @@ export const App: React.FC = () => {
             isVerifying={isVerifying}
             latestResult={latestResult}
             latestResponseText={latestResponseText}
+          />
+        ) : activeView === 'tests' ? (
+          <TestSuitePanel
+            report={testReport}
+            isRunning={isRunningTests}
+            progress={testProgress}
+            totalCases={VERIFIER_TEST_CASES.length}
+            onRun={handleRunTests}
           />
         ) : (
           <ModelComparisonView
@@ -247,7 +290,7 @@ export const App: React.FC = () => {
       {/* Footer */}
       <footer className="border-t border-slate-900 bg-slate-950/80 px-4 py-6 text-center text-xs text-slate-500 space-y-1">
         <div>
-          <strong>GroundCheck / AuditLens</strong> — LLM output verification &amp; audit-trail layer, built on Exasol Personal.
+          <strong>GroundCheck / AuditLens</strong> — LLM output verification &amp; audit-trail layer. Data is stored in browser local storage; an Exasol schema is included for deployment.
         </div>
         <div className="font-mono text-[11px] text-slate-600">
           Tables: <span className="text-slate-400">KNOWLEDGE_BASE</span> • <span className="text-slate-400">CHECKS</span> • View: <span className="text-slate-400">DAILY_MODEL_STATS</span>

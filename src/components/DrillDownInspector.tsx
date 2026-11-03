@@ -12,6 +12,7 @@ import {
   BookOpen,
 } from 'lucide-react';
 import { CheckRecord, KnowledgeBaseDoc } from '../types/groundcheck';
+import { ClaimLogCard } from './ClaimLogCard';
 
 interface DrillDownInspectorProps {
   checks: CheckRecord[];
@@ -217,7 +218,7 @@ export const DrillDownInspector: React.FC<DrillDownInspectorProps> = ({
               {activeCheck.usedWebSearch && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950 border border-cyan-500/40 text-cyan-300">
                   <Globe className="w-3 h-3 text-cyan-400" />
-                  Web Search Grounding Utilized
+                  Google Search grounding used
                 </span>
               )}
             </div>
@@ -239,12 +240,12 @@ export const DrillDownInspector: React.FC<DrillDownInspectorProps> = ({
                       {cite.sourceType === 'web' ? (
                         <>
                           <Globe className="w-3 h-3 text-cyan-400" />
-                          Web Search Reference
+                          Web Search Reference{cite.trust === 'lower' ? ' (lower trust)' : ''}
                         </>
                       ) : (
                         <>
                           <FileText className="w-3 h-3 text-blue-400" />
-                          Exasol KB Local Doc
+                          Local KB document
                         </>
                       )}
                     </span>
@@ -282,12 +283,29 @@ export const DrillDownInspector: React.FC<DrillDownInspectorProps> = ({
           </div>
         )}
 
+        {/* Saved per-claim log (records created before per-claim logging have none) */}
+        {activeCheck.claimsAnalysis && activeCheck.claimsAnalysis.length > 0 && (
+          <div className="pt-2 border-t border-slate-800 space-y-2">
+            <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+              Per-claim log ({activeCheck.claimsAnalysis.length} claim{activeCheck.claimsAnalysis.length > 1 ? 's' : ''})
+            </div>
+            {activeCheck.claimsAnalysis.map((claim, i) => (
+              <ClaimLogCard
+                key={claim.claimId}
+                claim={claim}
+                index={i + 1}
+                webSearchEnabled={activeCheck.usedWebSearch === true}
+              />
+            ))}
+          </div>
+        )}
+
         {/* Matched Ground Truth Source Documents */}
         {relatedDocs.length > 0 && (
           <div className="pt-2 border-t border-slate-800">
             <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
               <FileText className="w-3.5 h-3.5 text-blue-400" />
-              <span>Matched Ground Truth Documents (from Exasol KNOWLEDGE_BASE):</span>
+              <span>Matched ground truth documents (local knowledge base):</span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
               {relatedDocs.map((doc) => (

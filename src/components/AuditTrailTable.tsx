@@ -137,10 +137,10 @@ export const AuditTrailTable: React.FC<AuditTrailTableProps> = ({
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div>
           <h2 className="text-base lg:text-lg font-bold text-white flex items-center gap-2">
-            <span>Audit trail — every check, queryable from Exasol</span>
+            <span>Audit trail — every check, stored in this browser</span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Append-only governance log in Exasol <code className="text-cyan-400 font-mono">CHECKS</code> table ({filtered.length} of {checks.length} records shown)
+            Append-only log in browser local storage (mirrors the Exasol <code className="text-cyan-400 font-mono">CHECKS</code> schema) ({filtered.length} of {checks.length} records shown)
           </p>
         </div>
 

@@ -2,7 +2,10 @@ import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
+import { judgePair, judgePairs } from './server/nliJudge.ts';
+import { extractSearchTerms } from './server/searchTerms.ts';
+import { searchWebGrounded } from './server/webGrounding.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,7 +27,6 @@ const ai = new GoogleGenAI({
 });
 
 const EMBEDDING_MODEL = 'gemini-embedding-2-preview';
-const NLI_MODEL = 'gemini-3.8-flash';
 
 /**
  * Health check endpoint
@@ -97,147 +99,62 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
 });
 
 /**
- * Helper to judge single premise/hypothesis pair via Gemini
- */
-async function judgeSinglePair(premise: string, hypothesis: string): Promise<{
-  entailment: number;
-  neutral: number;
-  contradiction: number;
-  error?: string;
-}> {
-  try {
-    const prompt = `Premise:
-"${premise}"
-
-Hypothesis:
-"${hypothesis}"`;
-
-    const systemInstruction = `You are a strict Natural Language Inference (NLI) judge.
-Evaluate whether the hypothesis is entailed by, neutral with respect to, or contradicted by the premise.
-MANDATORY RULES:
-1. Judge ONLY from the explicit text provided in the premise.
-2. Treat the premise as the sole and complete universe of evidence.
-3. NEVER assume, extrapolate, or use outside world knowledge not explicitly present in the premise.
-4. Output probabilities for entailment, neutral, and contradiction, each between 0.0 and 1.0.`;
-
-    const response = await ai.models.generateContent({
-      model: NLI_MODEL,
-      contents: prompt,
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            entailment: { type: Type.NUMBER, description: 'Probability of entailment (0 to 1)' },
-            neutral: { type: Type.NUMBER, description: 'Probability of neutral (0 to 1)' },
-            contradiction: { type: Type.NUMBER, description: 'Probability of contradiction (0 to 1)' },
-          },
-          required: ['entailment', 'neutral', 'contradiction'],
-        },
-      },
-    });
-
-    const text = response.text?.trim() || '{}';
-    const parsed = JSON.parse(text) as { entailment?: number; neutral?: number; contradiction?: number };
-
-    let e = typeof parsed.entailment === 'number' && !isNaN(parsed.entailment) ? Math.max(0, parsed.entailment) : 0;
-    let n = typeof parsed.neutral === 'number' && !isNaN(parsed.neutral) ? Math.max(0, parsed.neutral) : 0;
-    let c = typeof parsed.contradiction === 'number' && !isNaN(parsed.contradiction) ? Math.max(0, parsed.contradiction) : 0;
-
-    const sum = e + n + c;
-    if (sum > 0) {
-      e = Math.round((e / sum) * 1000) / 1000;
-      n = Math.round((n / sum) * 1000) / 1000;
-      c = Math.round((1 - e - n) * 1000) / 1000;
-      return { entailment: Math.max(0, e), neutral: Math.max(0, n), contradiction: Math.max(0, c) };
-    }
-
-    return { entailment: 0, neutral: 1, contradiction: 0, error: 'Invalid probability distribution' };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn('NLI judgment failed:', msg);
-    return { entailment: 0, neutral: 1, contradiction: 0, error: msg };
-  }
-}
-
-/**
  * Server-side NLI Single Judgment Endpoint
  */
 app.post('/api/nli/judge', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { premise, hypothesis } = req.body as { premise?: unknown; hypothesis?: unknown };
-    if (typeof premise !== 'string' || typeof hypothesis !== 'string') {
-      res.status(400).json({ error: 'premise and hypothesis must both be strings' });
-      return;
-    }
-
-    const result = await judgeSinglePair(premise, hypothesis);
-    res.json(result);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ entailment: 0, neutral: 1, contradiction: 0, error: msg });
+  const { premise, hypothesis } = req.body as { premise?: unknown; hypothesis?: unknown };
+  if (typeof premise !== 'string' || typeof hypothesis !== 'string') {
+    res.status(400).json({ error: 'premise and hypothesis must both be strings' });
+    return;
   }
+  // judgePair never throws; failures come back as neutral = 1 with `error` set.
+  res.json(await judgePair(ai, premise, hypothesis));
 });
 
 /**
- * Server-side NLI Batch Judgment Endpoint with Concurrency Limit & Timeout
+ * Server-side NLI Batch Judgment Endpoint (bounded concurrency + per-call timeout)
  */
 app.post('/api/nli/judge-batch', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { pairs } = req.body as { pairs?: { premise: string; hypothesis: string }[] };
-    if (!Array.isArray(pairs)) {
-      res.status(400).json({ error: 'pairs must be an array of {premise, hypothesis}' });
-      return;
-    }
-
-    const results: { entailment: number; neutral: number; contradiction: number; error?: string }[] = new Array(pairs.length);
-    const CONCURRENCY = 4;
-    const PER_CALL_TIMEOUT_MS = 10000;
-
-    let index = 0;
-    const executeWorker = async () => {
-      while (index < pairs.length) {
-        const currentIndex = index++;
-        const pair = pairs[currentIndex];
-
-        if (!pair || typeof pair.premise !== 'string' || typeof pair.hypothesis !== 'string') {
-          results[currentIndex] = { entailment: 0, neutral: 1, contradiction: 0, error: 'Invalid pair payload' };
-          continue;
-        }
-
-        // Apply timeout
-        const timeoutPromise = new Promise<{
-          entailment: number;
-          neutral: number;
-          contradiction: number;
-          error?: string;
-        }>((resolve) => {
-          setTimeout(() => {
-            resolve({ entailment: 0, neutral: 1, contradiction: 0, error: 'Evaluation timed out' });
-          }, PER_CALL_TIMEOUT_MS);
-        });
-
-        const judgment = await Promise.race([
-          judgeSinglePair(pair.premise, pair.hypothesis),
-          timeoutPromise,
-        ]);
-
-        results[currentIndex] = judgment;
-      }
-    };
-
-    const workers: Promise<void>[] = [];
-    for (let w = 0; w < Math.min(CONCURRENCY, pairs.length); w++) {
-      workers.push(executeWorker());
-    }
-    await Promise.all(workers);
-
-    res.json({ results });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: msg });
+  const { pairs, concurrency, timeoutMs } = req.body as {
+    pairs?: unknown;
+    concurrency?: unknown;
+    timeoutMs?: unknown;
+  };
+  if (!Array.isArray(pairs)) {
+    res.status(400).json({ error: 'pairs must be an array of {premise, hypothesis}' });
+    return;
   }
+  const results = await judgePairs(ai, pairs, {
+    concurrency: typeof concurrency === 'number' ? concurrency : undefined,
+    timeoutMs: typeof timeoutMs === 'number' ? timeoutMs : undefined,
+  });
+  res.json({ results });
+});
+
+/**
+ * Key-term extraction for web search queries (Gemini, temperature 0, JSON schema)
+ */
+app.post('/api/search/terms', async (req: Request, res: Response): Promise<void> => {
+  const { prompt } = req.body as { prompt?: unknown };
+  if (typeof prompt !== 'string') {
+    res.status(400).json({ error: 'prompt must be a string' });
+    return;
+  }
+  // extractSearchTerms never throws; failures come back with `error` set and no terms.
+  res.json(await extractSearchTerms(ai, prompt));
+});
+
+/**
+ * Web retrieval via Gemini Google Search grounding (sources from grounding metadata only)
+ */
+app.post('/api/search/web', async (req: Request, res: Response): Promise<void> => {
+  const { query } = req.body as { query?: unknown };
+  if (typeof query !== 'string') {
+    res.status(400).json({ error: 'query must be a string' });
+    return;
+  }
+  // searchWebGrounded never throws; failures come back with `error` set and no results.
+  res.json(await searchWebGrounded(ai, query));
 });
 
 /**
@@ -255,7 +172,8 @@ async function startServer(): Promise<void> {
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
+    // Express 5 (path-to-regexp v8) requires a named wildcard for the SPA catch-all
+    app.get('/{*splat}', (_req: Request, res: Response) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }

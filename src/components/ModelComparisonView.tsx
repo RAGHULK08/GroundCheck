@@ -197,6 +197,7 @@ export const ModelComparisonView: React.FC<ModelComparisonViewProps> = ({
           createdAt: timestamp,
           citations: ev.result.citations,
           usedWebSearch: ev.result.usedWebSearch,
+          claimsAnalysis: ev.result.claimsAnalysis,
         });
       }
     }
@@ -252,7 +253,7 @@ export const ModelComparisonView: React.FC<ModelComparisonViewProps> = ({
             </h2>
           </div>
           <p className="text-xs lg:text-sm text-slate-400 mt-1">
-            Evaluate the same prompt across multiple LLMs simultaneously to compare verdicts, confidence scores, and hallucination rates against Exasol ground truth.
+            Evaluate the same prompt across multiple LLMs simultaneously to compare verdicts, confidence scores, and hallucination rates against the local knowledge base.
           </p>
         </div>
 
@@ -267,12 +268,12 @@ export const ModelComparisonView: React.FC<ModelComparisonViewProps> = ({
                   ? 'bg-emerald-950 border border-emerald-500/50 text-emerald-300'
                   : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
               }`}
-              title="Save all comparison evaluations as audit records in Exasol"
+              title="Save all comparison evaluations as audit records in browser local storage"
             >
               {loggedToAudit ? (
                 <>
                   <Check className="w-4 h-4 text-emerald-400" />
-                  <span>Logged to Exasol CHECKS</span>
+                  <span>Saved to audit log</span>
                 </>
               ) : (
                 <>
@@ -436,7 +437,7 @@ export const ModelComparisonView: React.FC<ModelComparisonViewProps> = ({
                 </div>
 
                 {hist && (
-                  <div className="text-[10px] font-mono text-slate-400" title={`Based on ${hist.total} historical checks in Exasol`}>
+                  <div className="text-[10px] font-mono text-slate-400" title={`Based on ${hist.total} historical checks in browser storage`}>
                     Hist. Hal: <span className="text-amber-400 font-bold">{hist.hallucinationRate}%</span>
                   </div>
                 )}

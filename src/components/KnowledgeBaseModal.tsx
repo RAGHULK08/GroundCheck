@@ -50,7 +50,7 @@ export const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({
           <div className="flex items-center gap-2.5">
             <BookOpen className="w-5 h-5 text-blue-400" />
             <h3 className="font-bold text-white text-base">
-              Exasol KNOWLEDGE_BASE Table ({docs.length} Documents)
+              Knowledge base ({docs.length} documents, browser local storage)
             </h3>
           </div>
           <button
@@ -65,7 +65,7 @@ export const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({
         <div className="p-5 overflow-y-auto space-y-4 flex-1">
           <div className="flex items-center justify-between">
             <p className="text-xs text-slate-400">
-              Source-of-truth documents stored in Exasol against which LLM output claims are compared and verified.
+              Source-of-truth documents, stored in this browser, against which LLM output claims are compared and verified.
             </p>
             <div className="flex items-center gap-2">
               <button

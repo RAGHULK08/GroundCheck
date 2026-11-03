@@ -46,20 +46,23 @@ export const Header: React.FC<HeaderProps> = ({
             <span>LLM output verification &amp; audit-trail layer</span>
             <span className="w-1 h-1 rounded-full bg-slate-600"></span>
             <span className="text-cyan-400 font-medium inline-flex items-center gap-1">
-              <Database className="w-3.5 h-3.5" /> backed live by Exasol Personal
+              <Database className="w-3.5 h-3.5" /> Exasol-ready schema
             </span>
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            Records are stored in this browser&apos;s local storage; no Exasol connection is configured yet.
           </p>
         </div>
 
         {/* Right Badges & Controls */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Exasol Live Badge */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-mono font-medium">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-            </span>
-            <span>EXASOL: LIVE</span>
+          {/* Storage backend badge (accurate: data lives in browser localStorage) */}
+          <div
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-800/80 border border-slate-600/50 text-slate-300 text-xs font-mono font-medium"
+            title="Knowledge base and audit records are kept in this browser's localStorage. They are not shared and are lost if site data is cleared."
+          >
+            <Database className="w-3.5 h-3.5 text-slate-400" />
+            <span>Local storage (browser)</span>
           </div>
 
           {/* Threshold setting */}

@@ -22,6 +22,17 @@ export interface Citation {
   snippet: string;
   similarityScore: number;
   claimText?: string;
+  /** 'lower' for web evidence (model-summarized grounding text), 'high' for the local KB. */
+  trust?: 'high' | 'lower';
+}
+
+/** A web snippet scored against a claim. */
+export interface WebEvidenceMatch {
+  result: WebSearchResult;
+  /** Embedding similarity between claim and snippet (0..1). */
+  similarity: number;
+  /** NLI judgment with the snippet as premise; only set for the best 3 snippets. */
+  nli?: NLIProbabilities;
 }
 
 export interface NLIProbabilities {
@@ -51,7 +62,27 @@ export interface ClaimAnalysis {
   webResults: WebSearchResult[];
   bestWebScore: number;
   isContradicted: boolean;
+  /** What triggered the contradiction, when isContradicted is true. */
+  contradictionSource?: ContradictionSource;
+  /** Chunk whose entailment grounded the claim, when grounded by the KB. */
+  supportingChunkId?: string;
+  /** Exact web search query sent for this claim. */
+  searchQuery?: string;
+  /** Prompt entities/terms appended to the claim in searchQuery. */
+  searchEntities?: string[];
+  /** True when term extraction failed and searchQuery is the claim alone. */
+  searchQueryDegraded?: boolean;
+  /** Reason the query was degraded. */
+  searchQueryError?: string;
+  /** Scored web snippets (best first); echo snippets excluded. */
+  webMatches?: WebEvidenceMatch[];
+  /** Set when web search was enabled but failed or was unavailable. */
+  webSearchError?: string;
+  /** Number of web snippets discarded because they restate the claim/query. */
+  webEchoesDiscarded?: number;
 }
+
+export type ContradictionSource = 'quantity' | 'nli';
 
 export interface FlaggedSpan {
   text: string;

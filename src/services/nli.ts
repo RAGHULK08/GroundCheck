@@ -1,4 +1,12 @@
 import { NLIProbabilities } from '../types/groundcheck';
+import { makeNeutralFallback, validateAndNormalizeScores } from './nliScores';
+
+/**
+ * Browser-side NLI client. The Gemini judge itself runs on the server
+ * (server/nliJudge.ts via @google/genai, temperature 0, strict JSON schema)
+ * so the API key never reaches the browser. This module adds caching,
+ * batching, timeouts and strict validation of what the server returns.
+ */
 
 export interface NLIPair {
   premise: string;
@@ -10,298 +18,244 @@ export interface NLIBatchResult {
   results: NLIProbabilities[];
 }
 
-const NLI_CACHE_KEY = 'groundcheck_nli_cache_v1';
+/** Bumped from v1: v1 entries came from a non-deterministic (temperature != 0) judge. */
+const NLI_CACHE_KEY = 'groundcheck_nli_cache_v2';
+const MAX_PERSISTED_ENTRIES = 500;
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_CONCURRENCY = 4;
+/** Extra client-side allowance on top of the server's own per-call timeouts. */
+const NETWORK_SLACK_MS = 3_000;
+const UNKNOWN_SOURCE = 'unknown';
 
-/**
- * In-memory NLI cache
- */
 const inMemoryNliCache = new Map<string, NLIProbabilities>();
 
 /**
- * Deterministic hash key for (premise, hypothesis) pair
+ * Deterministic 53-bit hash (cyrb53) of the trimmed (premise, hypothesis) pair,
+ * prefixed with both lengths to make collisions between distinct pairs negligible.
  */
 export function hashPair(premise: string, hypothesis: string): string {
-  const combined = `${premise.trim()}|||${hypothesis.trim()}`;
-  let hash = 5381;
+  const p = premise.trim();
+  const h = hypothesis.trim();
+  const combined = `${p}\u0000${h}`;
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
   for (let i = 0; i < combined.length; i++) {
-    hash = (hash * 33) ^ combined.charCodeAt(i);
+    const ch = combined.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
   }
-  return (hash >>> 0).toString(16);
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  const hash = 4294967296 * (2097151 & h2) + (h1 >>> 0);
+  return `${p.length}.${h.length}.${hash.toString(16)}`;
 }
 
-/**
- * Load persisted NLI cache from localStorage
- */
 function loadPersistedNliCache(): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      const stored = localStorage.getItem(NLI_CACHE_KEY);
-      if (stored) {
-        const parsed: Record<string, NLIProbabilities> = JSON.parse(stored);
-        for (const [key, val] of Object.entries(parsed)) {
-          if (
-            typeof val.entailment === 'number' &&
-            typeof val.neutral === 'number' &&
-            typeof val.contradiction === 'number'
-          ) {
-            inMemoryNliCache.set(key, val);
-          }
-        }
-      }
+    if (typeof localStorage === 'undefined') return;
+    const stored = localStorage.getItem(NLI_CACHE_KEY);
+    if (!stored) return;
+    const parsed: unknown = JSON.parse(stored);
+    if (typeof parsed !== 'object' || parsed === null) return;
+    for (const [key, val] of Object.entries(parsed as Record<string, unknown>)) {
+      const source =
+        typeof val === 'object' && val !== null && typeof (val as { source?: unknown }).source === 'string'
+          ? (val as { source: string }).source
+          : UNKNOWN_SOURCE;
+      const validation = validateAndNormalizeScores(val, source);
+      if (validation.ok) inMemoryNliCache.set(key, validation.value);
     }
-  } catch {
-    // Graceful storage fallback
+  } catch (err) {
+    console.warn('NLI cache could not be loaded from localStorage; starting empty.', err);
   }
 }
 
-/**
- * Persist in-memory NLI cache to localStorage
- */
 function persistNliCache(): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      const obj: Record<string, NLIProbabilities> = {};
-      const entries = Array.from(inMemoryNliCache.entries()).slice(-500);
-      for (const [key, val] of entries) {
-        obj[key] = val;
-      }
-      localStorage.setItem(NLI_CACHE_KEY, JSON.stringify(obj));
+    if (typeof localStorage === 'undefined') return;
+    const obj: Record<string, NLIProbabilities> = {};
+    for (const [key, val] of Array.from(inMemoryNliCache.entries()).slice(-MAX_PERSISTED_ENTRIES)) {
+      obj[key] = val;
     }
-  } catch {
-    // Graceful storage fallback
+    localStorage.setItem(NLI_CACHE_KEY, JSON.stringify(obj));
+  } catch (err) {
+    // Persistence is a convenience; the in-memory cache still works.
+    console.warn('NLI cache could not be persisted to localStorage.', err);
   }
 }
 
-// Load cache on module initialization
 loadPersistedNliCache();
 
+/** Store only successful judgments; errors must be retried, never replayed from cache. */
+function cacheIfValid(key: string, result: NLIProbabilities): boolean {
+  if (result.error) return false;
+  inMemoryNliCache.set(key, result);
+  return true;
+}
+
 /**
- * Normalize probabilities so entailment + neutral + contradiction = 1
+ * Normalize probabilities so entailment + neutral + contradiction = 1.
+ * Kept for backwards compatibility. Invalid inputs (negative, NaN, > 1, zero sum)
+ * produce an error-flagged neutral result instead of fabricated numbers.
  */
 export function normalizeNliProbabilities(
   rawEntailment: number,
   rawNeutral: number,
   rawContradiction: number,
-  error?: string
+  error?: string,
+  source: string = UNKNOWN_SOURCE
 ): NLIProbabilities {
-  const e = Math.max(0, rawEntailment);
-  const n = Math.max(0, rawNeutral);
-  const c = Math.max(0, rawContradiction);
-  const sum = e + n + c;
+  if (error) return makeNeutralFallback(error, source);
+  const validation = validateAndNormalizeScores(
+    { entailment: rawEntailment, neutral: rawNeutral, contradiction: rawContradiction },
+    source
+  );
+  return validation.ok ? validation.value : makeNeutralFallback(validation.error, source);
+}
 
-  if (sum > 0) {
-    const normE = Math.round((e / sum) * 1000) / 1000;
-    const normN = Math.round((n / sum) * 1000) / 1000;
-    const normC = Math.round((1 - normE - normN) * 1000) / 1000;
-    return {
-      entailment: Math.max(0, normE),
-      neutral: Math.max(0, normN),
-      contradiction: Math.max(0, normC),
-      error,
-      source: 'gemini-3.8-flash',
-    };
+/** Strictly interpret one judgment object returned by the server. */
+function parseServerJudgment(raw: unknown): NLIProbabilities {
+  if (typeof raw !== 'object' || raw === null) {
+    return makeNeutralFallback('Malformed NLI response from server');
   }
-
-  return {
-    entailment: 0,
-    neutral: 1,
-    contradiction: 0,
-    error: error || 'Zero probability sum',
-    source: 'fallback',
-  };
+  const { error, source } = raw as { error?: unknown; source?: unknown };
+  const src = typeof source === 'string' ? source : UNKNOWN_SOURCE;
+  if (typeof error === 'string' && error) {
+    return makeNeutralFallback(error, src);
+  }
+  const validation = validateAndNormalizeScores(raw, src);
+  return validation.ok ? validation.value : makeNeutralFallback(`Server NLI response rejected: ${validation.error}`);
 }
 
-/**
- * Default safe fallback for errors: neutral = 1 with error flag
- */
-function makeNeutralFallback(errorMessage: string): NLIProbabilities {
-  return {
-    entailment: 0,
-    neutral: 1,
-    contradiction: 0,
-    error: errorMessage,
-    source: 'error-fallback',
-  };
-}
-
-/**
- * Call server-side /api/nli/judge with timeout
- */
-async function callServerNliJudge(
-  premise: string,
-  hypothesis: string,
-  timeoutMs = 10000
-): Promise<NLIProbabilities> {
+async function postJson(url: string, body: unknown, timeoutMs: number): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const res = await fetch('/api/nli/judge', {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ premise, hypothesis }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
-
     if (!res.ok) {
-      const errorText = await res.text();
-      return makeNeutralFallback(`Server responded with ${res.status}: ${errorText}`);
+      const text = await res.text().catch(() => '');
+      throw new Error(`Server responded with ${res.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
     }
-
-    const data = (await res.json()) as {
-      entailment?: number;
-      neutral?: number;
-      contradiction?: number;
-      error?: string;
-    };
-
-    if (data.error) {
-      return makeNeutralFallback(data.error);
-    }
-
-    return normalizeNliProbabilities(
-      data.entailment ?? 0,
-      data.neutral ?? 1,
-      data.contradiction ?? 0
-    );
+    return (await res.json()) as unknown;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return makeNeutralFallback(`NLI request failed: ${msg}`);
+    if (controller.signal.aborted) throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
+    throw err;
   } finally {
     clearTimeout(timer);
   }
 }
 
 /**
- * Judge entailment for a premise and hypothesis.
- * Uses cached result if available, otherwise queries server endpoint.
+ * Judge whether `premise` entails, is neutral to, or contradicts `hypothesis`.
+ * Never throws. On any failure returns neutral = 1 with `error` set.
  */
 export async function judgeEntailment(
   premise: string,
-  hypothesis: string
+  hypothesis: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
 ): Promise<NLIProbabilities> {
-  const trimmedPremise = premise.trim();
-  const trimmedHypothesis = hypothesis.trim();
+  const p = premise.trim();
+  const h = hypothesis.trim();
+  if (!p || !h) return makeNeutralFallback('Empty premise or hypothesis');
 
-  if (!trimmedPremise || !trimmedHypothesis) {
-    return makeNeutralFallback('Empty premise or hypothesis');
+  const key = hashPair(p, h);
+  const cached = inMemoryNliCache.get(key);
+  if (cached) return cached;
+
+  let result: NLIProbabilities;
+  try {
+    const data = await postJson('/api/nli/judge', { premise: p, hypothesis: h }, timeoutMs + NETWORK_SLACK_MS);
+    result = parseServerJudgment(data);
+  } catch (err) {
+    result = makeNeutralFallback(`NLI request failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  const cacheKey = hashPair(trimmedPremise, trimmedHypothesis);
-  if (inMemoryNliCache.has(cacheKey)) {
-    return inMemoryNliCache.get(cacheKey)!;
-  }
-
-  const result = await callServerNliJudge(trimmedPremise, trimmedHypothesis);
-
-  // Only cache valid non-error judgments
-  if (!result.error) {
-    inMemoryNliCache.set(cacheKey, result);
-    persistNliCache();
-  }
-
+  if (cacheIfValid(key, result)) persistNliCache();
   return result;
 }
 
 /**
- * Judge a batch of premise-hypothesis pairs with concurrency limit (4) and per-call timeout.
+ * Judge many pairs with a concurrency limit and per-call timeout.
+ * Uses the server batch endpoint; if that request itself fails, falls back to
+ * individual calls through a client-side worker pool (logged, not silent).
+ * Result order matches input order.
  */
 export async function judgeEntailmentBatch(
   pairs: NLIPair[],
-  concurrency = 4,
-  timeoutMs = 10000
+  concurrency: number = DEFAULT_CONCURRENCY,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
 ): Promise<NLIProbabilities[]> {
-  if (pairs.length === 0) {
-    return [];
-  }
-
   const results: NLIProbabilities[] = new Array(pairs.length);
-  const uncachedIndices: number[] = [];
-  const uncachedPairs: NLIPair[] = [];
+  const pending: { index: number; pair: NLIPair; key: string }[] = [];
 
-  // Check cache first
   for (let i = 0; i < pairs.length; i++) {
-    const key = hashPair(pairs[i].premise, pairs[i].hypothesis);
-    if (inMemoryNliCache.has(key)) {
-      results[i] = inMemoryNliCache.get(key)!;
+    const p = pairs[i].premise.trim();
+    const h = pairs[i].hypothesis.trim();
+    if (!p || !h) {
+      results[i] = makeNeutralFallback('Empty premise or hypothesis');
+      continue;
+    }
+    const key = hashPair(p, h);
+    const cached = inMemoryNliCache.get(key);
+    if (cached) {
+      results[i] = cached;
     } else {
-      uncachedIndices.push(i);
-      uncachedPairs.push(pairs[i]);
+      pending.push({ index: i, pair: { premise: p, hypothesis: h }, key });
     }
   }
 
-  if (uncachedIndices.length === 0) {
-    return results;
-  }
+  if (pending.length === 0) return results;
 
-  // Attempt batch call to server if available
+  const safeConcurrency = Math.max(1, Math.floor(concurrency));
+  // Server runs ceil(n / concurrency) sequential rounds, each bounded by timeoutMs.
+  const batchTimeoutMs = Math.ceil(pending.length / safeConcurrency) * timeoutMs + NETWORK_SLACK_MS;
+
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs * 2);
-
-    const res = await fetch('/api/nli/judge-batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pairs: uncachedPairs }),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timer);
-
-    if (res.ok) {
-      const data = (await res.json()) as {
-        results?: { entailment: number; neutral: number; contradiction: number; error?: string }[];
-      };
-
-      if (data.results && data.results.length === uncachedPairs.length) {
-        let cacheUpdated = false;
-        for (let j = 0; j < uncachedIndices.length; j++) {
-          const originalIdx = uncachedIndices[j];
-          const rawItem = data.results[j];
-          const normalized = normalizeNliProbabilities(
-            rawItem.entailment,
-            rawItem.neutral,
-            rawItem.contradiction,
-            rawItem.error
-          );
-          results[originalIdx] = normalized;
-
-          if (!normalized.error) {
-            const key = hashPair(uncachedPairs[j].premise, uncachedPairs[j].hypothesis);
-            inMemoryNliCache.set(key, normalized);
-            cacheUpdated = true;
-          }
-        }
-
-        if (cacheUpdated) {
-          persistNliCache();
-        }
-
-        return results;
-      }
+    const data = await postJson(
+      '/api/nli/judge-batch',
+      { pairs: pending.map((x) => x.pair), concurrency: safeConcurrency, timeoutMs },
+      batchTimeoutMs
+    );
+    const serverResults = (data as { results?: unknown } | null)?.results;
+    if (!Array.isArray(serverResults) || serverResults.length !== pending.length) {
+      throw new Error(
+        `Batch response length mismatch: expected ${pending.length}, got ${
+          Array.isArray(serverResults) ? serverResults.length : 'none'
+        }`
+      );
     }
-  } catch {
-    // Fall back to client concurrent worker pool below
+
+    let cacheUpdated = false;
+    pending.forEach((item, j) => {
+      const judgment = parseServerJudgment(serverResults[j]);
+      results[item.index] = judgment;
+      if (cacheIfValid(item.key, judgment)) cacheUpdated = true;
+    });
+    if (cacheUpdated) persistNliCache();
+    return results;
+  } catch (err) {
+    console.warn(
+      'NLI batch endpoint failed; falling back to individual calls.',
+      err instanceof Error ? err.message : err
+    );
   }
 
-  // Concurrent worker execution
-  let nextIdx = 0;
-  const executeWorker = async (): Promise<void> => {
-    while (nextIdx < uncachedIndices.length) {
-      const current = nextIdx++;
-      const originalIdx = uncachedIndices[current];
-      const pair = uncachedPairs[current];
-      const judgment = await judgeEntailment(pair.premise, pair.hypothesis);
-      results[originalIdx] = judgment;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < pending.length) {
+      const item = pending[next++];
+      results[item.index] = await judgeEntailment(item.pair.premise, item.pair.hypothesis, timeoutMs);
     }
   };
-
   const pool: Promise<void>[] = [];
-  const workerCount = Math.min(concurrency, uncachedIndices.length);
-  for (let w = 0; w < workerCount; w++) {
-    pool.push(executeWorker());
+  for (let w = 0; w < Math.min(safeConcurrency, pending.length); w++) {
+    pool.push(worker());
   }
-
   await Promise.all(pool);
   return results;
 }
