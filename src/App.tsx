@@ -96,7 +96,7 @@ export const App: React.FC = () => {
     setVerifyError(null);
 
     try {
-      const { result, usedDocIds } = await verifyResponse(
+      const { result, usedDocIds, checkRecord } = await verifyResponse(
         prompt,
         response,
         modelName,
@@ -105,11 +105,11 @@ export const App: React.FC = () => {
         enableWebSearch
       );
 
-      const newRecord: CheckRecord = {
+      const newRecord: CheckRecord = checkRecord ?? {
         checkId: result.checkId,
         prompt,
         response,
-        modelName,
+        modelName: result.modelName || modelName,
         verdict: result.verdict,
         confidenceScore: result.confidenceScore,
         flaggedSpans: result.flaggedSpans,

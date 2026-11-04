@@ -150,4 +150,6 @@ export interface VerificationResult {
   promptKbScore?: number;
   /** Claims that could not be verified because of infrastructure failures (not part of the verdict). */
   infrastructureErrors?: number;
+  /** The effective model that produced the answer/verification, accounting for fallbacks. */
+  modelName?: string;
 }

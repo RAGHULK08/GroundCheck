@@ -188,7 +188,7 @@ export const ModelComparisonView: React.FC<ModelComparisonViewProps> = ({
           checkId: ev.result.checkId,
           prompt,
           response: ev.response,
-          modelName: model,
+          modelName: ev.result.modelName || model,
           verdict: ev.result.verdict,
           confidenceScore: ev.result.confidenceScore,
           flaggedSpans: ev.result.flaggedSpans,

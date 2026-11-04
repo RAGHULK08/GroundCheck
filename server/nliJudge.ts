@@ -28,6 +28,10 @@ export interface NliPairInput {
 export interface NliBatchOptions {
   concurrency?: number;
   timeoutMs?: number;
+  generationConfig?: {
+    temperature?: number;
+    [key: string]: unknown;
+  };
 }
 
 const SYSTEM_INSTRUCTION = `You are a strict Natural Language Inference (NLI) judge.
@@ -68,40 +72,45 @@ interface ModelText {
 }
 
 /** One Gemini attempt with its own timeout; returns the raw response text and the answering model. */
-async function callJudgeModel(ai: GoogleGenAI, premise: string, hypothesis: string, timeoutMs: number): Promise<ModelText> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+async function callJudgeModel(
+  ai: GoogleGenAI,
+  premise: string,
+  hypothesis: string,
+  timeoutMs: number,
+  generationConfig?: { temperature?: number }
+): Promise<ModelText> {
+  const temperature = generationConfig?.temperature ?? 0;
   let lastError: unknown;
-  try {
-    for (const model of GEMINI_CHAT_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: `PREMISE:\n"""\n${premise}\n"""\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
-          config: {
-            systemInstruction: SYSTEM_INSTRUCTION,
-            temperature: 0,
-            responseMimeType: 'application/json',
-            responseSchema: RESPONSE_SCHEMA,
-            abortSignal: controller.signal,
-          },
-        });
-        return { text: response.text?.trim() ?? '', model };
-      } catch (err) {
-        lastError = err;
-        if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
-        const status = statusOf(err);
-        if (status === 503 || status === 429 || status === 500 || status === 504) {
-          console.warn(`[nli] Model ${model} returned ${status}; trying next fallback model...`);
-          continue;
-        }
-        throw err;
+  for (const model of GEMINI_CHAT_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: `PREMISE:\n"""\n${premise}\n"""\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+          temperature,
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
+          abortSignal: controller.signal,
+        },
+      });
+      return { text: response.text?.trim() ?? '', model };
+    } catch (err) {
+      lastError = err;
+      const isTimeout = controller.signal.aborted;
+      const status = statusOf(err);
+      if (isTimeout || status === 503 || status === 429 || status === 500 || status === 504) {
+        console.warn(`[nli] Model ${model} ${isTimeout ? 'timed out' : `returned ${status}`}; trying next fallback model...`);
+        continue;
       }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
-    throw lastError;
-  } finally {
-    clearTimeout(timer);
   }
+  throw lastError;
 }
 
 /**
@@ -113,7 +122,8 @@ export async function judgePairStrict(
   ai: GoogleGenAI,
   premise: string,
   hypothesis: string,
-  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS
+  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS,
+  options?: { generationConfig?: { temperature?: number } }
 ): Promise<NliJudgment> {
   if (!premise.trim() || !hypothesis.trim()) {
     return { result: makeNeutralFallback('Empty premise or hypothesis'), attempts: 0 };
@@ -124,7 +134,7 @@ export async function judgePairStrict(
   const {
     value: { text, model },
     attempts,
-  } = await withRetryDetailed(() => callJudgeModel(ai, premise, hypothesis, timeoutMs), 'nli.judge');
+  } = await withRetryDetailed(() => callJudgeModel(ai, premise, hypothesis, timeoutMs, options?.generationConfig), 'nli.judge');
   if (!text) return { result: { ...makeNeutralFallback('NLI model returned an empty response'), attempts }, attempts };
   let parsed: unknown;
   try {
@@ -174,42 +184,42 @@ async function callMultiJudgeModel(
   ai: GoogleGenAI,
   premises: readonly string[],
   hypothesis: string,
-  timeoutMs: number
+  timeoutMs: number,
+  generationConfig?: { temperature?: number }
 ): Promise<ModelText> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const temperature = generationConfig?.temperature ?? 0;
   const numbered = premises.map((p, i) => `PREMISE ${i + 1}:\n"""\n${p}\n"""`).join('\n\n');
   let lastError: unknown;
-  try {
-    for (const model of GEMINI_CHAT_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: `${numbered}\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
-          config: {
-            systemInstruction: MULTI_SYSTEM_INSTRUCTION,
-            temperature: 0,
-            responseMimeType: 'application/json',
-            responseSchema: MULTI_RESPONSE_SCHEMA,
-            abortSignal: controller.signal,
-          },
-        });
-        return { text: response.text?.trim() ?? '', model };
-      } catch (err) {
-        lastError = err;
-        if (controller.signal.aborted) throw new AttemptTimeoutError(`NLI call timed out after ${timeoutMs}ms`);
-        const status = statusOf(err);
-        if (status === 503 || status === 429 || status === 500 || status === 504) {
-          console.warn(`[nli] Multi-model ${model} returned ${status}; trying next fallback model...`);
-          continue;
-        }
-        throw err;
+  for (const model of GEMINI_CHAT_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: `${numbered}\n\nHYPOTHESIS:\n"""\n${hypothesis}\n"""`,
+        config: {
+          systemInstruction: MULTI_SYSTEM_INSTRUCTION,
+          temperature,
+          responseMimeType: 'application/json',
+          responseSchema: MULTI_RESPONSE_SCHEMA,
+          abortSignal: controller.signal,
+        },
+      });
+      return { text: response.text?.trim() ?? '', model };
+    } catch (err) {
+      lastError = err;
+      const isTimeout = controller.signal.aborted;
+      const status = statusOf(err);
+      if (isTimeout || status === 503 || status === 429 || status === 500 || status === 504) {
+        console.warn(`[nli] Multi-model ${model} ${isTimeout ? 'timed out' : `returned ${status}`}; trying next fallback model...`);
+        continue;
       }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
-    throw lastError;
-  } finally {
-    clearTimeout(timer);
   }
+  throw lastError;
 }
 
 /** Pure: map a multi-premise response to one result per premise (error-flagged where missing/invalid). */
@@ -253,14 +263,18 @@ export async function judgeHypothesisGroup(
   ai: GoogleGenAI,
   premises: readonly string[],
   hypothesis: string,
-  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS
+  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS,
+  generationConfig?: { temperature?: number }
 ): Promise<NLIProbabilities[]> {
-  if (premises.length === 1) return [await judgePair(ai, premises[0], hypothesis, timeoutMs)];
+  if (premises.length === 1) return [await judgePair(ai, premises[0], hypothesis, timeoutMs, { generationConfig })];
   try {
     const {
       value: { text, model },
       attempts,
-    } = await withRetryDetailed(() => callMultiJudgeModel(ai, premises, hypothesis, timeoutMs), 'nli.judge-group');
+    } = await withRetryDetailed(
+      () => callMultiJudgeModel(ai, premises, hypothesis, timeoutMs, generationConfig),
+      'nli.judge-group'
+    );
     const results = parseMultiJudgments(text, premises.length, attempts, model);
     results.forEach((r, i) => {
       // Cache primary-model answers only (see judgePairStrict).
@@ -294,10 +308,11 @@ export async function judgePair(
   ai: GoogleGenAI,
   premise: string,
   hypothesis: string,
-  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS
+  timeoutMs: number = DEFAULT_NLI_TIMEOUT_MS,
+  options?: { generationConfig?: { temperature?: number } }
 ): Promise<NLIProbabilities> {
   try {
-    return (await judgePairStrict(ai, premise, hypothesis, timeoutMs)).result;
+    return (await judgePairStrict(ai, premise, hypothesis, timeoutMs, options)).result;
   } catch (err) {
     if (err instanceof UpstreamError) {
       console.warn(`NLI judgment failed: ${err.code} after ${err.attempts} attempt(s)`);
@@ -362,7 +377,8 @@ export async function judgePairs(
         ai,
         task.items.map((x) => x.premise),
         task.hypothesis,
-        timeoutMs
+        timeoutMs,
+        options.generationConfig
       );
       task.items.forEach((x, j) => {
         results[x.index] = judged[j];

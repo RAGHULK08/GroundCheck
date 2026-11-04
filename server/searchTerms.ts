@@ -107,39 +107,37 @@ export function extractLocalFallbackTerms(prompt: string): string[] {
 
 /** One Gemini attempt with its own timeout; returns the raw response text. */
 async function callTermsModel(ai: GoogleGenAI, prompt: string, timeoutMs: number): Promise<{ text: string; model: string }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let lastError: unknown;
-  try {
-    for (const model of GEMINI_CHAT_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: `USER PROMPT:\n"""\n${prompt}\n"""`,
-          config: {
-            systemInstruction: SYSTEM_INSTRUCTION,
-            temperature: 0,
-            responseMimeType: 'application/json',
-            responseSchema: RESPONSE_SCHEMA,
-            abortSignal: controller.signal,
-          },
-        });
-        return { text: response.text?.trim() ?? '', model };
-      } catch (err) {
-        lastError = err;
-        if (controller.signal.aborted) throw new AttemptTimeoutError(`Term extraction timed out after ${timeoutMs}ms`);
-        const status = statusOf(err);
-        if (status === 503 || status === 429 || status === 500 || status === 504) {
-          console.warn(`[terms] Model ${model} returned ${status}; trying next fallback model...`);
-          continue;
-        }
-        throw err;
+  for (const model of GEMINI_CHAT_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: `USER PROMPT:\n"""\n${prompt}\n"""`,
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+          temperature: 0,
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
+          abortSignal: controller.signal,
+        },
+      });
+      return { text: response.text?.trim() ?? '', model };
+    } catch (err) {
+      lastError = err;
+      const isTimeout = controller.signal.aborted;
+      const status = statusOf(err);
+      if (isTimeout || status === 503 || status === 429 || status === 500 || status === 504) {
+        console.warn(`[terms] Model ${model} ${isTimeout ? 'timed out' : `returned ${status}`}; trying next fallback model...`);
+        continue;
       }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
-    throw lastError;
-  } finally {
-    clearTimeout(timer);
   }
+  throw lastError;
 }
 
 /**

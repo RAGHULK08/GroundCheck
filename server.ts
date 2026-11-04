@@ -169,13 +169,17 @@ app.post('/api/embeddings', async (req: Request, res: Response): Promise<void> =
  * Server-side NLI Single Judgment Endpoint
  */
 app.post('/api/nli/judge', async (req: Request, res: Response): Promise<void> => {
-  const { premise, hypothesis } = req.body as { premise?: unknown; hypothesis?: unknown };
+  const { premise, hypothesis, generationConfig } = req.body as {
+    premise?: unknown;
+    hypothesis?: unknown;
+    generationConfig?: { temperature?: number };
+  };
   if (typeof premise !== 'string' || typeof hypothesis !== 'string') {
     res.status(400).json({ error: 'premise and hypothesis must both be strings' });
     return;
   }
   try {
-    const { result, attempts } = await judgePairStrict(ai, premise, hypothesis);
+    const { result, attempts } = await judgePairStrict(ai, premise, hypothesis, undefined, { generationConfig });
     res.json({ ...result, attempts });
   } catch (err) {
     sendRouteError(res, 'nli.judge', err);
@@ -186,10 +190,11 @@ app.post('/api/nli/judge', async (req: Request, res: Response): Promise<void> =>
  * Server-side NLI Batch Judgment Endpoint (bounded concurrency + per-call timeout)
  */
 app.post('/api/nli/judge-batch', async (req: Request, res: Response): Promise<void> => {
-  const { pairs, concurrency, timeoutMs } = req.body as {
+  const { pairs, concurrency, timeoutMs, generationConfig } = req.body as {
     pairs?: unknown;
     concurrency?: unknown;
     timeoutMs?: unknown;
+    generationConfig?: { temperature?: number };
   };
   if (!Array.isArray(pairs)) {
     res.status(400).json({ error: 'pairs must be an array of {premise, hypothesis}' });
@@ -200,6 +205,7 @@ app.post('/api/nli/judge-batch', async (req: Request, res: Response): Promise<vo
     const results = await judgePairs(ai, pairs, {
       concurrency: typeof concurrency === 'number' ? concurrency : undefined,
       timeoutMs: typeof timeoutMs === 'number' ? timeoutMs : undefined,
+      generationConfig,
     });
     res.json({ results });
   } catch (err) {
@@ -274,7 +280,16 @@ function exitPortInUse(port: number): never {
 async function startServer(): Promise<void> {
   const isProduction = process.env.NODE_ENV === 'production';
 
-  if (await isPortInUse(PORT)) exitPortInUse(PORT);
+  let inUse = await isPortInUse(PORT);
+  if (inUse) {
+    // Port may be in TIME_WAIT during rapid restarts; wait up to 3.5s before giving up
+    const deadline = Date.now() + 3500;
+    while (inUse && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      inUse = await isPortInUse(PORT);
+    }
+    if (inUse) exitPortInUse(PORT);
+  }
 
   // One HTTP server for the app AND Vite's hot-reload websocket. Running the websocket on
   // the same port (instead of a separate one like 24678) means it also works behind HTTPS

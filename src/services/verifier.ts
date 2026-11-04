@@ -2,6 +2,7 @@ import {
   KnowledgeBaseDoc,
   FlaggedSpan,
   VerificationResult,
+  CheckRecord,
   Verdict,
   Citation,
   ChunkMatch,
@@ -65,15 +66,27 @@ export async function computeSimilarity(
 }
 
 /**
+ * Formalized entailment generation configuration at temperature 0
+ * to ensure deterministic inference across all claim entailment checks.
+ */
+export const ENTAILMENT_GENERATION_CONFIG = {
+  generationConfig: {
+    temperature: 0,
+  },
+} as const;
+
+/**
  * Natural Language Inference (NLI) model running between a premise (KB chunk) and hypothesis (claim).
+ * Explicitly passes generationConfig: { temperature: 0 } during the entailment check.
  * Thin async wrapper around judgeEntailment in nli.ts for backwards compatibility.
  */
 export async function runNLIModel(
   premiseChunk: string,
   hypothesisClaim: string,
-  _similarity?: number
+  _similarity?: number,
+  options = ENTAILMENT_GENERATION_CONFIG
 ): Promise<NLIProbabilities> {
-  return judgeEntailment(premiseChunk, hypothesisClaim);
+  return judgeEntailment(premiseChunk, hypothesisClaim, undefined, options);
 }
 
 /**
@@ -196,7 +209,13 @@ async function gatherWebEvidence(prompt: string, claim: string, enabled: boolean
     scored.sort((a, b) => b.similarity - a.similarity);
 
     const top = scored.slice(0, WEB_NLI_TOP_K);
-    const judgments = await judgeEntailmentBatch(top.map((m) => ({ premise: m.result.snippet, hypothesis: claim })));
+    // Explicitly pass generationConfig: { temperature: 0 } for web evidence entailment check
+    const judgments = await judgeEntailmentBatch(
+      top.map((m) => ({ premise: m.result.snippet, hypothesis: claim })),
+      undefined,
+      undefined,
+      ENTAILMENT_GENERATION_CONFIG
+    );
     top.forEach((m, i) => {
       m.nli = judgments[i];
     });
@@ -239,6 +258,79 @@ function buildWebCitation(result: WebSearchResult, score: number, claim: string)
 }
 
 /**
+ * Detect the effective model that performed the verification.
+ * If a fallback model was used (recorded in chunk.nli.source or match.nli.source),
+ * this returns the true responding model name rather than defaulting to the primary model.
+ */
+export function detectEffectiveModel(
+  claimsAnalysis: ClaimAnalysis[],
+  defaultModelName: string
+): string {
+  const modelVotes = new Map<string, number>();
+
+  for (const claim of claimsAnalysis) {
+    for (const chunk of claim.top3Chunks) {
+      const src = chunk.nli?.source;
+      if (src && src !== 'unknown') {
+        modelVotes.set(src, (modelVotes.get(src) ?? 0) + 1);
+      }
+    }
+    if (claim.webMatches) {
+      for (const match of claim.webMatches) {
+        const src = match.nli?.source;
+        if (src && src !== 'unknown') {
+          modelVotes.set(src, (modelVotes.get(src) ?? 0) + 1);
+        }
+      }
+    }
+  }
+
+  if (modelVotes.size === 0) return defaultModelName;
+
+  // Determine the model with the most judgments
+  let bestModel = defaultModelName;
+  let maxVotes = -1;
+  for (const [model, votes] of modelVotes.entries()) {
+    if (votes > maxVotes) {
+      maxVotes = votes;
+      bestModel = model;
+    }
+  }
+
+  return bestModel;
+}
+
+/**
+ * Build a CheckRecord from a VerificationResult, detecting any fallback model
+ * used during the verification process to ensure the record reflects the actual responding model.
+ */
+export function buildCheckRecord(
+  result: VerificationResult,
+  prompt: string,
+  response: string,
+  defaultModelName: string,
+  sourceDocIds: string[] = []
+): CheckRecord {
+  const effectiveModel = result.modelName || detectEffectiveModel(result.claimsAnalysis, defaultModelName);
+  return {
+    checkId: result.checkId,
+    prompt,
+    response,
+    modelName: effectiveModel,
+    verdict: result.verdict,
+    confidenceScore: result.confidenceScore,
+    flaggedSpans: result.flaggedSpans,
+    sourceDocIds,
+    latencyMs: result.latencyMs,
+    createdAt: new Date().toISOString(),
+    citations: result.citations,
+    usedWebSearch: result.usedWebSearch,
+    claimsAnalysis: result.claimsAnalysis,
+    infrastructureErrors: result.infrastructureErrors,
+  };
+}
+
+/**
  * Run verification on a response against the local knowledge base,
  * with NLI on the top 3 chunks for every claim. Orchestrates I/O (embeddings, NLI,
  * web search) and delegates every decision to the pure helpers in claimClassifier.ts.
@@ -253,6 +345,7 @@ export async function verifyResponse(
 ): Promise<{
   result: VerificationResult;
   usedDocIds: string[];
+  checkRecord: CheckRecord;
 }> {
   const start = performance.now();
 
@@ -293,12 +386,18 @@ export async function verifyResponse(
     chunkScores.sort((a, b) => b.score - a.score);
     const top3Scored = chunkScores.slice(0, 3);
 
-    // 2. Run NLI model on the top 3 chunks regardless of similarity
+    // 2. Run NLI model on the top 3 chunks regardless of similarity.
+    // Explicitly pass generationConfig: { temperature: 0 } during the entailment check.
     const top3Pairs = top3Scored.map((item) => ({
       premise: item.chunk.text,
       hypothesis: claim,
     }));
-    const top3NliResults = await judgeEntailmentBatch(top3Pairs);
+    const top3NliResults = await judgeEntailmentBatch(
+      top3Pairs,
+      undefined,
+      undefined,
+      ENTAILMENT_GENERATION_CONFIG
+    );
 
     const top3Chunks: ChunkMatch[] = top3Scored.map((item, idx) => ({
       chunkId: item.chunk.chunkId,
@@ -398,21 +497,35 @@ export async function verifyResponse(
       ? crypto.randomUUID()
       : `chk-${Date.now().toString(36)}-${performance.now().toString(36).replace('.', '')}`;
 
+  const effectiveModel = detectEffectiveModel(claimsAnalysis, modelName);
+
+  const verificationResult: VerificationResult = {
+    checkId,
+    verdict: overallVerdict,
+    confidenceScore: Math.round(avgConfidence * 10000) / 10000,
+    flaggedSpans,
+    claimsAnalysis,
+    numClaims: totalClaims,
+    numFlagged: flaggedSpans.length,
+    latencyMs,
+    citations,
+    usedWebSearch: didUseWebSearch,
+    promptKbScore: Math.round(promptKbScore * 100) / 100,
+    infrastructureErrors: infrastructureErrors > 0 ? infrastructureErrors : undefined,
+    modelName: effectiveModel,
+  };
+
+  const checkRecord = buildCheckRecord(
+    verificationResult,
+    prompt,
+    response,
+    modelName,
+    Array.from(usedDocIds)
+  );
+
   return {
-    result: {
-      checkId,
-      verdict: overallVerdict,
-      confidenceScore: Math.round(avgConfidence * 10000) / 10000,
-      flaggedSpans,
-      claimsAnalysis,
-      numClaims: totalClaims,
-      numFlagged: flaggedSpans.length,
-      latencyMs,
-      citations,
-      usedWebSearch: didUseWebSearch,
-      promptKbScore: Math.round(promptKbScore * 100) / 100,
-      infrastructureErrors: infrastructureErrors > 0 ? infrastructureErrors : undefined,
-    },
+    result: verificationResult,
     usedDocIds: Array.from(usedDocIds),
+    checkRecord,
   };
 }

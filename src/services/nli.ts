@@ -163,6 +163,13 @@ async function postJson(url: string, body: unknown, timeoutMs: number): Promise<
   return fetchJson<unknown>(url, { method: 'POST', json: body, timeoutMs });
 }
 
+export interface NLIOptions {
+  generationConfig?: {
+    temperature?: number;
+    [key: string]: unknown;
+  };
+}
+
 /**
  * Judge whether `premise` entails, is neutral to, or contradicts `hypothesis`.
  * Never throws. On any failure returns neutral = 1 with `error` set.
@@ -170,7 +177,8 @@ async function postJson(url: string, body: unknown, timeoutMs: number): Promise<
 export async function judgeEntailment(
   premise: string,
   hypothesis: string,
-  timeoutMs: number = DEFAULT_TIMEOUT_MS
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  options: NLIOptions = { generationConfig: { temperature: 0 } }
 ): Promise<NLIProbabilities> {
   const p = premise.trim();
   const h = hypothesis.trim();
@@ -182,7 +190,15 @@ export async function judgeEntailment(
 
   let result: NLIProbabilities;
   try {
-    const data = await postJson('/api/nli/judge', { premise: p, hypothesis: h }, retryAwareTimeout(timeoutMs));
+    const data = await postJson(
+      '/api/nli/judge',
+      {
+        premise: p,
+        hypothesis: h,
+        generationConfig: options.generationConfig ?? { temperature: 0 },
+      },
+      retryAwareTimeout(timeoutMs)
+    );
     result = parseServerJudgment(data);
   } catch (err) {
     result = failedJudgment(err);
@@ -202,7 +218,8 @@ export async function judgeEntailment(
 export async function judgeEntailmentBatch(
   pairs: NLIPair[],
   concurrency: number = DEFAULT_CONCURRENCY,
-  timeoutMs: number = DEFAULT_TIMEOUT_MS
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  options: NLIOptions = { generationConfig: { temperature: 0 } }
 ): Promise<NLIProbabilities[]> {
   const results: NLIProbabilities[] = new Array(pairs.length);
   const pending: { index: number; pair: NLIPair; key: string }[] = [];
@@ -234,7 +251,12 @@ export async function judgeEntailmentBatch(
   try {
     const data = await postJson(
       '/api/nli/judge-batch',
-      { pairs: pending.map((x) => x.pair), concurrency: safeConcurrency, timeoutMs },
+      {
+        pairs: pending.map((x) => x.pair),
+        concurrency: safeConcurrency,
+        timeoutMs,
+        generationConfig: options.generationConfig ?? { temperature: 0 },
+      },
       batchTimeoutMs
     );
     const serverResults = (data as { results?: unknown } | null)?.results;
